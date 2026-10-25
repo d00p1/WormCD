@@ -12,6 +12,10 @@ shellcheck = "0.11.0"
 description = "Scan called Go code for known vulnerabilities"
 run = "go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./..."
 
+[tasks.install-hooks]
+description = "Install the pre-commit and pre-push git hooks"
+run = "hk install --mise"
+
 [tasks.check]
 description = "Run every quality gate (the same command CI runs)"
 run = "hk check --all"
