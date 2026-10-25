@@ -192,7 +192,7 @@ type Desired struct {
 
 Swarm-реализация:
 
-- `Inspect` — services/configs/secrets/networks, отфильтрованные по меткам;
+- `Inspect` — services/configs/secrets/networks/volumes, отфильтрованные по меткам;
 - `Apply` — создание сетей, создание configs/secrets, `ServiceUpdate` для сервисов;
 - configs/secrets иммутабельны: новое содержимое = новое имя с хешем, сервис переключается, старые удаляются после успешной сходимости;
 - `Health` — desired replicas vs running, статус update, ошибки задач; опционально HTTP-проба с control plane (у Swarm нет readiness).

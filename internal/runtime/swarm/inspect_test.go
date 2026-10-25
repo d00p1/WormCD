@@ -140,21 +140,6 @@ func TestInspect(t *testing.T) {
 					TaskTemplate: swarm.TaskSpec{ContainerSpec: &swarm.ContainerSpec{Image: "x:v1"}},
 				},
 			},
-			{
-				Spec: swarm.ServiceSpec{
-					Annotations: swarm.Annotations{Name: "job", Labels: labels},
-					Mode:        swarm.ServiceMode{ReplicatedJob: &swarm.ReplicatedJob{}},
-					TaskTemplate: swarm.TaskSpec{
-						ContainerSpec: &swarm.ContainerSpec{Image: "x:v1"},
-					},
-				},
-			},
-			{
-				Spec: swarm.ServiceSpec{
-					Annotations:  swarm.Annotations{Name: "no_container", Labels: labels},
-					TaskTemplate: swarm.TaskSpec{},
-				},
-			},
 		}},
 		networks: client.NetworkListResult{Items: []network.Summary{
 			{Network: network.Network{
@@ -195,7 +180,7 @@ func TestInspect(t *testing.T) {
 		t.Fatalf("scope = %s/%s/%s", observed.Application, observed.Target, observed.Namespace)
 	}
 	if len(observed.Services) != 1 {
-		t.Fatalf("services = %d, want 1 (other target, job and containerless services must be skipped)", len(observed.Services))
+		t.Fatalf("services = %d, want 1 (the other target must be skipped)", len(observed.Services))
 	}
 
 	service := observed.Services[0]
@@ -301,6 +286,52 @@ func TestInspect(t *testing.T) {
 	}
 	if len(observed.Volumes) != 1 || observed.Volumes[0].Name != "wormcd_web_prod_data" {
 		t.Errorf("observed volumes = %+v", observed.Volumes)
+	}
+}
+
+func TestInspectRejectsUnsupportedServices(t *testing.T) {
+	labels := map[string]string{
+		desired.LabelApplication: "web",
+		desired.LabelTarget:      "prod",
+	}
+
+	tests := []struct {
+		name string
+		spec swarm.ServiceSpec
+		want string
+	}{
+		{
+			name: "job",
+			spec: swarm.ServiceSpec{
+				Annotations: swarm.Annotations{Name: "job", Labels: labels},
+				Mode:        swarm.ServiceMode{ReplicatedJob: &swarm.ReplicatedJob{}},
+			},
+			want: "job modes are not supported",
+		},
+		{
+			name: "no container",
+			spec: swarm.ServiceSpec{
+				Annotations: swarm.Annotations{Name: "no_container", Labels: labels},
+			},
+			want: "container spec is missing",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := &fakeAPI{services: client.ServiceListResult{Items: []swarm.Service{{Spec: tt.spec}}}}
+			_, err := newRuntime(fake).Inspect(context.Background(), runtime.Scope{Application: "web", Target: "prod"})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestInspectRejectsEmptyScope(t *testing.T) {
+	_, err := newRuntime(&fakeAPI{}).Inspect(context.Background(), runtime.Scope{})
+	if err == nil || !strings.Contains(err.Error(), "application and target are required") {
+		t.Fatalf("error = %v, want a scope validation error", err)
 	}
 }
 

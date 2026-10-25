@@ -24,8 +24,9 @@ type Scope struct {
 
 // Observed is the normalized state read from a runtime. It contains only
 // objects owned by the target (discovered by the WormCD labels). External
-// networks, volumes, configs and secrets are not included: they carry no
-// ownership labels and are not managed by WormCD.
+// networks, volumes, configs and secrets normally carry no ownership labels
+// and are therefore not included; a labelled external object would be
+// indistinguishable from a managed one.
 type Observed struct {
 	Application string
 	Target      string

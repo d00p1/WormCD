@@ -288,7 +288,7 @@ func (n *normalizer) service(key string, s types.ServiceConfig) (desired.Service
 	}
 	endpointMode := deploy.EndpointMode
 	if endpointMode == "" {
-		endpointMode = "vip"
+		endpointMode = desired.DefaultEndpointMode
 	}
 
 	mode, replicas, err := serviceMode(key, s, deploy)
@@ -381,7 +381,7 @@ func (n *normalizer) service(key string, s types.ServiceConfig) (desired.Service
 
 func serviceMode(key string, s types.ServiceConfig, deploy *types.DeployConfig) (desired.ServiceMode, uint64, error) {
 	mode := desired.ModeReplicated
-	replicas := uint64(1)
+	replicas := desired.DefaultReplicas
 
 	switch deploy.Mode {
 	case "", "replicated":
@@ -629,12 +629,9 @@ func serviceHealthcheck(key string, cfg *types.HealthCheckConfig) (*desired.Heal
 		return nil, fmt.Errorf("service %q: healthcheck.start_interval is not supported", key)
 	}
 
-	out := &desired.Healthcheck{
-		Test:     append([]string(nil), cfg.Test...),
-		Interval: 30 * time.Second,
-		Timeout:  30 * time.Second,
-		Retries:  3,
-	}
+	defaults := desired.DefaultHealthcheck()
+	defaults.Test = append([]string(nil), cfg.Test...)
+	out := &defaults
 	if cfg.Interval != nil {
 		out.Interval = time.Duration(*cfg.Interval)
 	}
@@ -688,7 +685,7 @@ func servicePlacement(placement types.Placement) desired.Placement {
 }
 
 func serviceRestart(key string, policy *types.RestartPolicy) (desired.RestartPolicy, error) {
-	out := desired.RestartPolicy{Condition: "any", Delay: 5 * time.Second}
+	out := desired.DefaultRestartPolicy()
 	if policy != nil {
 		if policy.Condition != "" {
 			out.Condition = policy.Condition
@@ -712,12 +709,7 @@ func serviceRestart(key string, policy *types.RestartPolicy) (desired.RestartPol
 }
 
 func serviceUpdate(key, field string, cfg *types.UpdateConfig) (desired.UpdateConfig, error) {
-	out := desired.UpdateConfig{
-		Parallelism:   1,
-		FailureAction: "pause",
-		Monitor:       5 * time.Second,
-		Order:         "stop-first",
-	}
+	out := desired.DefaultUpdateConfig()
 	if cfg != nil {
 		if cfg.Parallelism != nil {
 			out.Parallelism = *cfg.Parallelism

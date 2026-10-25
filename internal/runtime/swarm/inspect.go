@@ -7,13 +7,14 @@ import (
 	"fmt"
 	"maps"
 	"strings"
-	"time"
 
 	"github.com/d00p1/wormcd/internal/desired"
 	"github.com/d00p1/wormcd/internal/runtime"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
+	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/api/types/swarm"
+	"github.com/moby/moby/api/types/volume"
 	"github.com/moby/moby/client"
 )
 
@@ -34,7 +35,7 @@ type Runtime struct {
 
 // New returns a Swarm runtime backed by a Docker client.
 func New(api *client.Client) *Runtime {
-	return &Runtime{api: api}
+	return newRuntime(api)
 }
 
 func newRuntime(api api) *Runtime {
@@ -49,6 +50,10 @@ func (r *Runtime) Kind() runtime.Kind {
 // Inspect returns the observed state owned by scope. It only performs
 // list operations and never mutates the cluster.
 func (r *Runtime) Inspect(ctx context.Context, scope runtime.Scope) (runtime.Observed, error) {
+	if scope.Application == "" || scope.Target == "" {
+		return runtime.Observed{}, fmt.Errorf("scope application and target are required")
+	}
+
 	services, err := r.api.ServiceList(ctx, client.ServiceListOptions{})
 	if err != nil {
 		return runtime.Observed{}, fmt.Errorf("list services: %w", err)
@@ -77,69 +82,56 @@ func (r *Runtime) Inspect(ctx context.Context, scope runtime.Scope) (runtime.Obs
 	}
 
 	networkNames := make(map[string]string, len(networks.Items))
-	for _, network := range networks.Items {
-		networkNames[network.ID] = network.Name
-		if !inScope(network.Labels, scope) {
-			continue
-		}
-		driver := network.Driver
+	for _, item := range networks.Items {
+		networkNames[item.ID] = item.Name
+	}
+	for _, item := range filterByScope(networks.Items, func(n network.Summary) map[string]string { return n.Labels }, scope) {
+		driver := item.Driver
 		if driver == "" {
 			driver = "overlay"
 		}
 		observed.Networks = append(observed.Networks, desired.Network{
-			Name:       network.Name,
+			Name:       item.Name,
 			Driver:     driver,
-			DriverOpts: maps.Clone(network.Options),
-			Attachable: network.Attachable,
-			Internal:   network.Internal,
-			Labels:     maps.Clone(network.Labels),
+			DriverOpts: maps.Clone(item.Options),
+			Attachable: item.Attachable,
+			Internal:   item.Internal,
+			Labels:     maps.Clone(item.Labels),
 		})
 	}
 
-	for _, service := range services.Items {
-		if !inScope(service.Spec.Labels, scope) {
-			continue
-		}
-		mapped, ok := mapService(service, networkNames)
-		if !ok {
-			continue
+	for _, item := range filterByScope(services.Items, func(s swarm.Service) map[string]string { return s.Spec.Labels }, scope) {
+		mapped, err := mapService(item, networkNames)
+		if err != nil {
+			return runtime.Observed{}, err
 		}
 		observed.Services = append(observed.Services, mapped)
 	}
 
-	for _, config := range configs.Items {
-		if !inScope(config.Spec.Labels, scope) {
-			continue
-		}
+	for _, item := range filterByScope(configs.Items, func(c swarm.Config) map[string]string { return c.Spec.Labels }, scope) {
 		observed.Configs = append(observed.Configs, desired.Config{
-			Name:   config.Spec.Name,
-			Labels: maps.Clone(config.Spec.Labels),
+			Name:   item.Spec.Name,
+			Labels: maps.Clone(item.Spec.Labels),
 		})
 	}
 
-	for _, secret := range secrets.Items {
-		if !inScope(secret.Spec.Labels, scope) {
-			continue
-		}
+	for _, item := range filterByScope(secrets.Items, func(s swarm.Secret) map[string]string { return s.Spec.Labels }, scope) {
 		observed.Secrets = append(observed.Secrets, desired.Secret{
-			Name:   secret.Spec.Name,
-			Labels: maps.Clone(secret.Spec.Labels),
+			Name:   item.Spec.Name,
+			Labels: maps.Clone(item.Spec.Labels),
 		})
 	}
 
-	for _, volume := range volumes.Items {
-		if !inScope(volume.Labels, scope) {
-			continue
-		}
-		driver := volume.Driver
+	for _, item := range filterByScope(volumes.Items, func(v volume.Volume) map[string]string { return v.Labels }, scope) {
+		driver := item.Driver
 		if driver == "" {
 			driver = "local"
 		}
 		observed.Volumes = append(observed.Volumes, desired.Volume{
-			Name:       volume.Name,
+			Name:       item.Name,
 			Driver:     driver,
-			DriverOpts: maps.Clone(volume.Options),
-			Labels:     maps.Clone(volume.Labels),
+			DriverOpts: maps.Clone(item.Options),
+			Labels:     maps.Clone(item.Labels),
 		})
 	}
 
@@ -152,22 +144,32 @@ func inScope(labels map[string]string, scope runtime.Scope) bool {
 		labels[desired.LabelTarget] == scope.Target
 }
 
-func mapService(service swarm.Service, networkNames map[string]string) (desired.Service, bool) {
+func filterByScope[T any](items []T, labels func(T) map[string]string, scope runtime.Scope) []T {
+	out := make([]T, 0, len(items))
+	for _, item := range items {
+		if inScope(labels(item), scope) {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func mapService(service swarm.Service, networkNames map[string]string) (desired.Service, error) {
 	spec := service.Spec
 	if spec.Mode.ReplicatedJob != nil || spec.Mode.GlobalJob != nil {
-		return desired.Service{}, false
+		return desired.Service{}, fmt.Errorf("service %q: job modes are not supported", spec.Name)
 	}
 	containerSpec := spec.TaskTemplate.ContainerSpec
 	if containerSpec == nil {
-		return desired.Service{}, false
+		return desired.Service{}, fmt.Errorf("service %q: container spec is missing", spec.Name)
 	}
 
 	out := desired.Service{
 		Name:         spec.Name,
 		Image:        containerSpec.Image,
 		Mode:         desired.ModeReplicated,
-		Replicas:     1,
-		EndpointMode: "vip",
+		Replicas:     desired.DefaultReplicas,
+		EndpointMode: desired.DefaultEndpointMode,
 		Command:      stringsPtr(containerSpec.Args),
 		Entrypoint:   stringsPtr(containerSpec.Command),
 		Env:          envMap(containerSpec.Env),
@@ -203,8 +205,7 @@ func mapService(service swarm.Service, networkNames map[string]string) (desired.
 			out.Replicas = *spec.Mode.Replicated.Replicas
 		}
 	default:
-		out.Mode = desired.ModeReplicated
-		out.Replicas = 1
+		// Keep the replicated defaults set above.
 	}
 
 	if spec.EndpointSpec != nil {
@@ -214,7 +215,7 @@ func mapService(service swarm.Service, networkNames map[string]string) (desired.
 		out.Ports = mapPorts(spec.EndpointSpec.Ports)
 	}
 
-	return out, true
+	return out, nil
 }
 
 func stringsPtr(values []string) *[]string {
@@ -373,12 +374,9 @@ func mapHealthcheck(healthcheck *container.HealthConfig) *desired.Healthcheck {
 		return nil
 	}
 
-	out := &desired.Healthcheck{
-		Test:     append([]string(nil), healthcheck.Test...),
-		Interval: 30 * time.Second,
-		Timeout:  30 * time.Second,
-		Retries:  3,
-	}
+	defaults := desired.DefaultHealthcheck()
+	defaults.Test = append([]string(nil), healthcheck.Test...)
+	out := &defaults
 	if healthcheck.Interval != 0 {
 		out.Interval = healthcheck.Interval
 	}
@@ -435,7 +433,7 @@ func mapPlacement(placement *swarm.Placement) desired.Placement {
 }
 
 func mapRestart(policy *swarm.RestartPolicy) desired.RestartPolicy {
-	out := desired.RestartPolicy{Condition: "any", Delay: 5 * time.Second}
+	out := desired.DefaultRestartPolicy()
 	if policy == nil {
 		return out
 	}
@@ -455,12 +453,7 @@ func mapRestart(policy *swarm.RestartPolicy) desired.RestartPolicy {
 }
 
 func mapUpdate(config *swarm.UpdateConfig) desired.UpdateConfig {
-	out := desired.UpdateConfig{
-		Parallelism:   1,
-		FailureAction: "pause",
-		Monitor:       5 * time.Second,
-		Order:         "stop-first",
-	}
+	out := desired.DefaultUpdateConfig()
 	if config == nil {
 		return out
 	}
