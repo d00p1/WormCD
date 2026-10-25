@@ -104,6 +104,10 @@ type MountType string
 const (
 	MountVolume MountType = "volume"
 	MountBind   MountType = "bind"
+	// MountTmpfs is only produced by runtime inspection: the renderer rejects
+	// tmpfs mounts in v0, but an out-of-band tmpfs mount must still be visible
+	// as drift.
+	MountTmpfs MountType = "tmpfs"
 )
 
 // Mount is a service volume mount.
@@ -228,14 +232,39 @@ type Volume struct {
 // Sort puts every collection in a deterministic order. Callers should invoke
 // it before marshaling or diffing.
 func (d *Desired) Sort() {
-	sort.Slice(d.Services, func(i, j int) bool { return d.Services[i].Name < d.Services[j].Name })
-	sort.Slice(d.Networks, func(i, j int) bool { return d.Networks[i].Name < d.Networks[j].Name })
-	sort.Slice(d.Configs, func(i, j int) bool { return d.Configs[i].Name < d.Configs[j].Name })
-	sort.Slice(d.Secrets, func(i, j int) bool { return d.Secrets[i].Name < d.Secrets[j].Name })
-	sort.Slice(d.Volumes, func(i, j int) bool { return d.Volumes[i].Name < d.Volumes[j].Name })
-	for i := range d.Services {
-		d.Services[i].sort()
+	SortServices(d.Services)
+	SortNetworks(d.Networks)
+	SortConfigs(d.Configs)
+	SortSecrets(d.Secrets)
+	SortVolumes(d.Volumes)
+}
+
+// SortServices orders services by name and each service's nested collections.
+func SortServices(services []Service) {
+	sort.Slice(services, func(i, j int) bool { return services[i].Name < services[j].Name })
+	for i := range services {
+		services[i].sort()
 	}
+}
+
+// SortNetworks orders networks by name.
+func SortNetworks(networks []Network) {
+	sort.Slice(networks, func(i, j int) bool { return networks[i].Name < networks[j].Name })
+}
+
+// SortConfigs orders configs by name.
+func SortConfigs(configs []Config) {
+	sort.Slice(configs, func(i, j int) bool { return configs[i].Name < configs[j].Name })
+}
+
+// SortSecrets orders secrets by name.
+func SortSecrets(secrets []Secret) {
+	sort.Slice(secrets, func(i, j int) bool { return secrets[i].Name < secrets[j].Name })
+}
+
+// SortVolumes orders volumes by name.
+func SortVolumes(volumes []Volume) {
+	sort.Slice(volumes, func(i, j int) bool { return volumes[i].Name < volumes[j].Name })
 }
 
 func (s *Service) sort() {

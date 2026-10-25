@@ -164,9 +164,14 @@ git commit -am "deploy(web/prod): $DIGEST" && git push
 Ядро не знает про Swarm. Оно работает с нормализованной моделью и интерфейсом:
 
 ```go
+type Scope struct {
+    Application string
+    Target      string
+}
+
 type Runtime interface {
     Kind() Kind
-    Inspect(ctx context.Context, app string) (Observed, error)
+    Inspect(ctx context.Context, scope Scope) (Observed, error)
     Apply(ctx context.Context, plan Plan) (Result, error)
     Prune(ctx context.Context, app string, keep Set) error
     Health(ctx context.Context, app string) (Health, error)
@@ -181,11 +186,13 @@ type Desired struct {
 }
 ```
 
+В M0 реализуется только `Inspect`; `Apply`, `Prune` и `Health` появляются в M1.
+
 Ключи объектов: `kind/name` внутри namespace приложения. Все создаваемые объекты получают метку `com.wormcd.application=<app>` и `com.wormcd.target=<target>`; по ним же фильтруется observed state и работает prune.
 
 Swarm-реализация:
 
-- `Inspect` — services/configs/secrets/networks, отфильтрованные по меткам;
+- `Inspect` — services/configs/secrets/networks/volumes, отфильтрованные по меткам;
 - `Apply` — создание сетей, создание configs/secrets, `ServiceUpdate` для сервисов;
 - configs/secrets иммутабельны: новое содержимое = новое имя с хешем, сервис переключается, старые удаляются после успешной сходимости;
 - `Health` — desired replicas vs running, статус update, ошибки задач; опционально HTTP-проба с control plane (у Swarm нет readiness).
