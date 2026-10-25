@@ -27,6 +27,13 @@ make build
 ./bin/wormcd server --listen :8080   # GET /healthz
 ```
 
+Render an application from a deploy repository (read-only, no cluster needed):
+
+```sh
+./bin/wormcd render --app web/prod --root /path/to/deploy-repo
+./bin/wormcd render --file deploy/apps/web/wormcd.yaml --target prod --output json
+```
+
 Unit tests are hermetic. The Docker integration test is opt-in:
 
 ```sh

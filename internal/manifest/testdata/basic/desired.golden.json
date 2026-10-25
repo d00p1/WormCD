@@ -1,0 +1,203 @@
+{
+  "application": "web",
+  "target": "prod",
+  "namespace": "wormcd_web_prod",
+  "services": [
+    {
+      "name": "wormcd_web_prod_web",
+      "image": "ghcr.io/d00p1/web@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "mode": "replicated",
+      "replicas": 3,
+      "command": [
+        "/app/server",
+        "--verbose"
+      ],
+      "entrypoint": [
+        "/app/entrypoint.sh"
+      ],
+      "env": {
+        "APP_ENV": "prod",
+        "LOG_LEVEL": "info"
+      },
+      "labels": {
+        "com.wormcd.application": "web",
+        "com.wormcd.target": "prod"
+      },
+      "ports": [
+        {
+          "target": 80,
+          "published": 8080,
+          "protocol": "tcp",
+          "mode": "ingress"
+        }
+      ],
+      "networks": [
+        {
+          "name": "wormcd_web_prod_default"
+        }
+      ],
+      "mounts": [
+        {
+          "type": "volume",
+          "source": "wormcd_web_prod_data",
+          "target": "/var/lib/web"
+        }
+      ],
+      "configs": [
+        {
+          "source": "wormcd_web_prod_nginx_56fccc8af6a7",
+          "target": "/etc/nginx/nginx.conf",
+          "mode": 292
+        }
+      ],
+      "secrets": [
+        {
+          "source": "prod_tls_key",
+          "target": "/run/secrets/tls.key",
+          "mode": 292
+        }
+      ],
+      "resources": {
+        "limits": {
+          "nanoCPUs": 500000000,
+          "memoryBytes": 134217728
+        },
+        "reservations": {
+          "nanoCPUs": 250000000,
+          "memoryBytes": 67108864
+        }
+      },
+      "placement": {
+        "constraints": [
+          "node.role == worker"
+        ]
+      },
+      "restart": {
+        "condition": "on-failure",
+        "delay": 10000000000,
+        "maxAttempts": 3,
+        "window": 0
+      },
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "curl",
+          "-f",
+          "http://localhost/"
+        ],
+        "interval": 10000000000,
+        "timeout": 2000000000,
+        "startPeriod": 0,
+        "retries": 3
+      },
+      "update": {
+        "parallelism": 1,
+        "delay": 0,
+        "failureAction": "pause",
+        "monitor": 5000000000,
+        "maxFailureRatio": 0,
+        "order": "stop-first"
+      },
+      "rollback": {
+        "parallelism": 1,
+        "delay": 0,
+        "failureAction": "pause",
+        "monitor": 5000000000,
+        "maxFailureRatio": 0,
+        "order": "stop-first"
+      }
+    },
+    {
+      "name": "wormcd_web_prod_worker",
+      "image": "ghcr.io/d00p1/worker:v1",
+      "mode": "replicated",
+      "replicas": 1,
+      "env": {
+        "APP_ENV": "staging"
+      },
+      "labels": {
+        "com.wormcd.application": "web",
+        "com.wormcd.target": "prod"
+      },
+      "networks": [
+        {
+          "name": "wormcd_web_prod_backend"
+        }
+      ],
+      "resources": {
+        "limits": {},
+        "reservations": {}
+      },
+      "placement": {},
+      "restart": {
+        "condition": "any",
+        "delay": 5000000000,
+        "maxAttempts": 0,
+        "window": 0
+      },
+      "update": {
+        "parallelism": 1,
+        "delay": 0,
+        "failureAction": "pause",
+        "monitor": 5000000000,
+        "maxFailureRatio": 0,
+        "order": "stop-first"
+      },
+      "rollback": {
+        "parallelism": 1,
+        "delay": 0,
+        "failureAction": "pause",
+        "monitor": 5000000000,
+        "maxFailureRatio": 0,
+        "order": "stop-first"
+      }
+    }
+  ],
+  "networks": [
+    {
+      "name": "wormcd_web_prod_backend",
+      "driver": "overlay",
+      "labels": {
+        "com.wormcd.application": "web",
+        "com.wormcd.target": "prod"
+      }
+    },
+    {
+      "name": "wormcd_web_prod_default",
+      "driver": "overlay",
+      "labels": {
+        "com.wormcd.application": "web",
+        "com.wormcd.target": "prod"
+      }
+    }
+  ],
+  "configs": [
+    {
+      "name": "wormcd_web_prod_nginx_56fccc8af6a7",
+      "source": "nginx",
+      "file": "configs/nginx.conf",
+      "hash": "56fccc8af6a7",
+      "labels": {
+        "com.wormcd.application": "web",
+        "com.wormcd.target": "prod"
+      }
+    }
+  ],
+  "secrets": [
+    {
+      "name": "prod_tls_key",
+      "source": "tls_key",
+      "external": true
+    }
+  ],
+  "volumes": [
+    {
+      "name": "wormcd_web_prod_data",
+      "driver": "local",
+      "labels": {
+        "com.wormcd.application": "web",
+        "com.wormcd.target": "prod"
+      }
+    }
+  ]
+}

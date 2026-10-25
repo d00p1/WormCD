@@ -1,0 +1,14 @@
+apiVersion: wormcd.dev/v1alpha1
+kind: Application
+metadata:
+  name: web
+spec:
+  compose: compose.yaml
+  targets:
+    - name: prod
+      cluster: prod-1
+      overlay: envs/prod.compose.yaml
+      syncPolicy:
+        automated: true
+        prune: true
+        selfHeal: true

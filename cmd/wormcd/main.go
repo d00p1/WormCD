@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -13,6 +14,8 @@ import (
 	"time"
 
 	"github.com/d00p1/wormcd/internal/api"
+	"github.com/d00p1/wormcd/internal/desired"
+	"github.com/d00p1/wormcd/internal/manifest"
 	"github.com/d00p1/wormcd/internal/version"
 )
 
@@ -35,6 +38,8 @@ func run(args []string) error {
 		return err
 	case "server":
 		return runServer(args[1:])
+	case "render":
+		return runRender(args[1:])
 	case "diff":
 		return runDiff(args[1:])
 	case "help", "-h", "--help":
@@ -54,6 +59,7 @@ Usage:
 
 Commands:
   server    run the control plane
+  render    render compose + overlay into the normalized desired state
   diff      show the plan against a cluster (read-only)
   version   print version information
 `)
@@ -91,6 +97,87 @@ func runServer(args []string) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)
+	}
+}
+
+func runRender(args []string) error {
+	fs := flag.NewFlagSet("render", flag.ContinueOnError)
+	file := fs.String("file", "", "path to wormcd.yaml")
+	app := fs.String("app", "", "application as name/target, discovered under --root")
+	root := fs.String("root", ".", "deploy repository root used by --app")
+	target := fs.String("target", "", "target name (optional when the app has one target)")
+	output := fs.String("output", "human", "output format: human or json")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *file == "" && *app == "" {
+		return errors.New("render: --file or --app is required")
+	}
+	if *file != "" && *app != "" {
+		return errors.New("render: --file and --app are mutually exclusive")
+	}
+	if *output != "human" && *output != "json" {
+		return fmt.Errorf("render: unsupported output format %q", *output)
+	}
+
+	state, err := manifest.Load(context.Background(), manifest.Options{
+		File:   *file,
+		App:    *app,
+		Root:   *root,
+		Target: *target,
+	})
+	if err != nil {
+		return err
+	}
+
+	if *output == "json" {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(state)
+	}
+
+	printDesired(state)
+	return nil
+}
+
+func printDesired(state *desired.Desired) {
+	_, _ = fmt.Printf("application: %s\ntarget: %s\nnamespace: %s\n", state.Application, state.Target, state.Namespace)
+
+	_, _ = fmt.Printf("services (%d):\n", len(state.Services))
+	for _, service := range state.Services {
+		replicas := fmt.Sprintf("x%d", service.Replicas)
+		if service.Mode == desired.ModeGlobal {
+			replicas = "global"
+		}
+		_, _ = fmt.Printf("  %s  %s  %s\n", service.Name, service.Image, replicas)
+	}
+
+	_, _ = fmt.Printf("networks (%d):\n", len(state.Networks))
+	for _, network := range state.Networks {
+		kind := network.Driver
+		if network.External {
+			kind = "external"
+		}
+		_, _ = fmt.Printf("  %s  %s\n", network.Name, kind)
+	}
+
+	_, _ = fmt.Printf("volumes (%d):\n", len(state.Volumes))
+	for _, volume := range state.Volumes {
+		kind := volume.Driver
+		if volume.External {
+			kind = "external"
+		}
+		_, _ = fmt.Printf("  %s  %s\n", volume.Name, kind)
+	}
+
+	_, _ = fmt.Printf("configs (%d):\n", len(state.Configs))
+	for _, config := range state.Configs {
+		_, _ = fmt.Printf("  %s\n", config.Name)
+	}
+
+	_, _ = fmt.Printf("secrets (%d):\n", len(state.Secrets))
+	for _, secret := range state.Secrets {
+		_, _ = fmt.Printf("  %s\n", secret.Name)
 	}
 }
 

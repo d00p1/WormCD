@@ -1,0 +1,7 @@
+services:
+  web:
+    image: ghcr.io/d00p1/web@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    environment:
+      APP_ENV: prod
+    deploy:
+      replicas: 3
