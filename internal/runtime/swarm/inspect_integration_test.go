@@ -23,12 +23,7 @@ func TestIntegrationInspect(t *testing.T) {
 		t.Skip("set WORMCD_INTEGRATION=1 to run against a Docker daemon")
 	}
 
-	endpoint := os.Getenv("WORMCD_DOCKER_ENDPOINT")
-	if endpoint == "" {
-		endpoint = "unix:///var/run/docker.sock"
-	}
-
-	api, err := cluster.New(cluster.Config{Name: "integration", Endpoint: endpoint})
+	api, err := cluster.New(integrationConfig(t))
 	if err != nil {
 		t.Fatalf("cluster.New: %v", err)
 	}
@@ -70,12 +65,7 @@ func TestIntegrationInspectStack(t *testing.T) {
 		t.Skip("set WORMCD_INTEGRATION=1 to run against a Docker daemon")
 	}
 
-	endpoint := os.Getenv("WORMCD_DOCKER_ENDPOINT")
-	if endpoint == "" {
-		endpoint = "unix:///var/run/docker.sock"
-	}
-
-	api, err := cluster.New(cluster.Config{Name: "integration", Endpoint: endpoint})
+	api, err := cluster.New(integrationConfig(t))
 	if err != nil {
 		t.Fatalf("cluster.New: %v", err)
 	}
@@ -167,6 +157,7 @@ func TestIntegrationInspectStack(t *testing.T) {
 					Image: "ghcr.io/d00p1/wormcd-integration:test",
 					Env:   []string{"APP_ENV=integration"},
 					Configs: []*swarm.ConfigReference{{
+						ConfigID:   createdConfig.ID,
 						ConfigName: configName,
 						File: &swarm.ConfigReferenceFileTarget{
 							Name: "/app/config",
@@ -174,6 +165,7 @@ func TestIntegrationInspectStack(t *testing.T) {
 						},
 					}},
 					Secrets: []*swarm.SecretReference{{
+						SecretID:   createdSecret.ID,
 						SecretName: secretName,
 						File: &swarm.SecretReferenceFileTarget{
 							Name: "/run/secrets/token",
@@ -257,4 +249,19 @@ func cleanup(t *testing.T, what string, remove func(context.Context) error) {
 		}
 		t.Errorf("remove %s: %v", what, err)
 	})
+}
+
+func integrationConfig(t *testing.T) cluster.Config {
+	t.Helper()
+	endpoint := os.Getenv("WORMCD_DOCKER_ENDPOINT")
+	if endpoint == "" {
+		endpoint = "unix:///var/run/docker.sock"
+	}
+	return cluster.Config{
+		Name:     "integration",
+		Endpoint: endpoint,
+		CAFile:   os.Getenv("WORMCD_DOCKER_CA"),
+		CertFile: os.Getenv("WORMCD_DOCKER_CERT"),
+		KeyFile:  os.Getenv("WORMCD_DOCKER_KEY"),
+	}
 }
