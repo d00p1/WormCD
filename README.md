@@ -27,6 +27,8 @@ reconciliation (apply) is next.
 | Webhooks, `syncPolicy`, rollback | not yet (M3) |
 | Registry polling for new image versions | not planned: CI builds the image and commits the digest to the deploy repository |
 
+![WormCD M0: manifests from Git, state from Swarm, read-only plan](docs/assets/wormcd-m0-readonly-diff.svg)
+
 To try it now, write the manifests in a local checkout, create the labelled
 objects described in [cmd/wormcd/testdata/stand/README.md](cmd/wormcd/testdata/stand/README.md),
 and run `wormcd diff`. A complete, renderable deploy repo lives in

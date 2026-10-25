@@ -1,0 +1,189 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="920" viewBox="0 0 1600 920" role="img" aria-labelledby="title desc">
+  <title id="title">WormCD M0: read-only diff</title>
+  <desc id="desc">Manifests from Git are rendered into Desired; Swarm is inspected into Observed; diff produces a plan without changing the cluster.</desc>
+
+  <defs>
+    <filter id="shadow" x="-8%" y="-8%" width="116%" height="120%">
+      <feDropShadow dx="0" dy="2" stdDeviation="6" flood-color="#0F172A" flood-opacity="0.07"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#475569"/>
+    </marker>
+    <marker id="arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#94A3B8"/>
+    </marker>
+    <style>
+      .bg { fill: #F8FAFC; }
+      .card { fill: #FFFFFF; stroke: #CBD5E1; stroke-width: 1.5; }
+      .ink { fill: #0F172A; }
+      .muted { fill: #64748B; }
+      .faint { fill: #94A3B8; }
+      .title { font: 700 30px Inter, "DejaVu Sans", sans-serif; letter-spacing: -0.4px; }
+      .subtitle { font: 400 16px Inter, "DejaVu Sans", sans-serif; }
+      .card-title { font: 650 18px Inter, "DejaVu Sans", sans-serif; }
+      .label { font: 500 14px Inter, "DejaVu Sans", sans-serif; }
+      .small { font: 400 13px Inter, "DejaVu Sans", sans-serif; }
+      .mono { font: 400 14px "JetBrains Mono", "DejaVu Sans Mono", monospace; }
+      .mono-sm { font: 400 12.5px "JetBrains Mono", "DejaVu Sans Mono", monospace; }
+      .arrow { stroke: #475569; stroke-width: 1.8; fill: none; }
+      .arrow-muted { stroke: #94A3B8; stroke-width: 1.8; fill: none; stroke-dasharray: 6 6; }
+      .pill { fill: #F1F5F9; stroke: #CBD5E1; stroke-width: 1; }
+      .pill-text { font: 600 11.5px Inter, "DejaVu Sans", sans-serif; fill: #475569; letter-spacing: 0.3px; }
+      .dot-green { fill: #16A34A; }
+      .dot-amber { fill: #D97706; }
+      .dot-red { fill: #DC2626; }
+      .dot-slate { fill: #94A3B8; }
+    </style>
+  </defs>
+
+  <rect class="bg" width="1600" height="920" rx="0"/>
+
+  <!-- Header -->
+  <text class="ink title" x="48" y="56">WormCD M0 — read-only diff</text>
+  <text class="muted subtitle" x="48" y="84">Manifests from Git, state from Swarm, a plan that changes nothing.</text>
+
+  <!-- Deploy repository -->
+  <g filter="url(#shadow)">
+    <rect class="card" x="40" y="120" width="340" height="220" rx="14"/>
+  </g>
+  <circle cx="62" cy="147" r="5" fill="#3B82F6"/>
+  <text class="ink card-title" x="78" y="153">Deploy repository · Git</text>
+  <text class="muted small" x="62" y="180">The only source of truth</text>
+  <text class="ink mono" x="62" y="212">apps/web/</text>
+  <text class="ink mono" x="62" y="238" xml:space="preserve">  wormcd.yaml</text>
+  <text class="ink mono" x="62" y="264" xml:space="preserve">  compose.yaml</text>
+  <text class="ink mono" x="62" y="290" xml:space="preserve">  envs/prod.compose.yaml</text>
+  <text class="ink mono" x="62" y="316" xml:space="preserve">  configs/config.yaml</text>
+
+  <!-- render -->
+  <g filter="url(#shadow)">
+    <rect class="card" x="450" y="175" width="180" height="130" rx="14"/>
+  </g>
+  <text class="ink card-title" x="540" y="213" text-anchor="middle">wormcd render</text>
+  <text class="muted small" x="540" y="241" text-anchor="middle">compose-go merge</text>
+  <text class="muted small" x="540" y="262" text-anchor="middle">base + overlay</text>
+  <text class="faint small" x="540" y="286" text-anchor="middle">no cluster needed</text>
+
+  <!-- Desired -->
+  <g filter="url(#shadow)">
+    <rect class="card" x="700" y="120" width="340" height="220" rx="14"/>
+  </g>
+  <circle cx="722" cy="147" r="5" fill="#16A34A"/>
+  <text class="ink card-title" x="738" y="153">Desired</text>
+  <text class="muted small" x="738" y="174">Normalized, runtime-agnostic</text>
+  <text class="muted small" x="722" y="207">Services</text>
+  <text class="ink mono-sm" x="1018" y="207" text-anchor="end">web</text>
+  <text class="muted small" x="722" y="234">Networks</text>
+  <text class="ink mono-sm" x="1018" y="234" text-anchor="end">_default</text>
+  <text class="muted small" x="722" y="261">Configs</text>
+  <text class="ink mono-sm" x="1018" y="261" text-anchor="end">app_config_&lt;hash&gt;</text>
+  <text class="muted small" x="722" y="288">Secrets</text>
+  <text class="ink mono-sm" x="1018" y="288" text-anchor="end">prod_tls_key</text>
+  <text class="muted small" x="722" y="315">Volumes</text>
+  <text class="ink mono-sm" x="1018" y="315" text-anchor="end">data</text>
+
+  <!-- Swarm -->
+  <g filter="url(#shadow)">
+    <rect class="card" x="40" y="480" width="340" height="220" rx="14"/>
+  </g>
+  <circle cx="62" cy="507" r="5" fill="#EA580C"/>
+  <text class="ink card-title" x="78" y="513">Swarm cluster</text>
+  <text class="muted small" x="62" y="540">Manager node</text>
+  <text class="ink mono" x="62" y="572">unix socket or mTLS</text>
+  <text class="ink mono" x="62" y="598">labels: com.wormcd.*</text>
+  <text class="muted small" x="62" y="634">Only objects labelled for this</text>
+  <text class="muted small" x="62" y="653">application and target are read.</text>
+
+  <!-- inspect -->
+  <g filter="url(#shadow)">
+    <rect class="card" x="450" y="535" width="180" height="130" rx="14"/>
+  </g>
+  <text class="ink card-title" x="540" y="573" text-anchor="middle">Runtime.Inspect</text>
+  <text class="muted small" x="540" y="601" text-anchor="middle">List* + Inspect*</text>
+  <text class="muted small" x="540" y="622" text-anchor="middle">read-only surface</text>
+  <text class="faint small" x="540" y="646" text-anchor="middle">by construction</text>
+
+  <!-- Observed -->
+  <g filter="url(#shadow)">
+    <rect class="card" x="700" y="480" width="340" height="220" rx="14"/>
+  </g>
+  <circle cx="722" cy="507" r="5" fill="#EA580C"/>
+  <text class="ink card-title" x="738" y="513">Observed</text>
+  <text class="muted small" x="738" y="534">Filtered by WormCD labels</text>
+  <text class="muted small" x="722" y="567">Services</text>
+  <text class="ink mono-sm" x="1018" y="567" text-anchor="end">web</text>
+  <text class="muted small" x="722" y="594">Networks</text>
+  <text class="ink mono-sm" x="1018" y="594" text-anchor="end">_default</text>
+  <text class="muted small" x="722" y="621">Configs</text>
+  <text class="ink mono-sm" x="1018" y="621" text-anchor="end">app_config_&lt;hash&gt;</text>
+  <text class="muted small" x="722" y="648">Secrets</text>
+  <text class="ink mono-sm" x="1018" y="648" text-anchor="end">prod_tls_key</text>
+  <text class="muted small" x="722" y="675">Volumes</text>
+  <text class="ink mono-sm" x="1018" y="675" text-anchor="end">data</text>
+
+  <!-- Arrows: top path -->
+  <path class="arrow" d="M380 230 L442 230" marker-end="url(#arrow)"/>
+  <path class="arrow" d="M630 230 L692 230" marker-end="url(#arrow)"/>
+
+  <!-- Arrows: bottom path -->
+  <path class="arrow" d="M380 590 L442 590" marker-end="url(#arrow)"/>
+  <path class="arrow" d="M630 590 L692 590" marker-end="url(#arrow)"/>
+
+  <!-- Arrows into diff -->
+  <path class="arrow" d="M1040 230 C1075 230 1070 350 1092 362" marker-end="url(#arrow)"/>
+  <path class="arrow" d="M1040 590 C1075 590 1070 470 1092 458" marker-end="url(#arrow)"/>
+
+  <!-- diff -->
+  <g filter="url(#shadow)">
+    <rect class="card" x="1100" y="310" width="190" height="190" rx="14"/>
+  </g>
+  <circle cx="1122" cy="337" r="5" fill="#7C3AED"/>
+  <text class="ink card-title" x="1138" y="343">wormcd diff</text>
+  <text class="muted small" x="1122" y="372">pure planner</text>
+  <text class="muted small" x="1122" y="393">no mutating calls</text>
+  <rect class="pill" x="1122" y="410" width="86" height="24" rx="12"/>
+  <text class="pill-text" x="1165" y="426" text-anchor="middle">READ-ONLY</text>
+  <text class="muted small" x="1122" y="462">stable order · kind/name</text>
+  <text class="muted small" x="1122" y="483">changed fields only</text>
+
+  <!-- diff to plan -->
+  <path class="arrow" d="M1290 405 L1332 405" marker-end="url(#arrow)"/>
+
+  <!-- Plan -->
+  <g filter="url(#shadow)">
+    <rect class="card" x="1340" y="240" width="220" height="330" rx="14"/>
+  </g>
+  <text class="ink card-title" x="1362" y="277">Plan</text>
+  <text class="muted small" x="1362" y="298">one entry per object</text>
+
+  <circle class="dot-green" cx="1371" cy="332" r="5"/>
+  <text class="ink label" x="1386" y="337">Create</text>
+  <circle class="dot-amber" cx="1371" cy="367" r="5"/>
+  <text class="ink label" x="1386" y="372">Update</text>
+  <circle class="dot-red" cx="1371" cy="402" r="5"/>
+  <text class="ink label" x="1386" y="407">Delete</text>
+  <circle class="dot-slate" cx="1371" cy="437" r="5"/>
+  <text class="ink label" x="1386" y="442">Noop</text>
+
+  <line x1="1362" y1="468" x2="1538" y2="468" stroke="#E2E8F0" stroke-width="1"/>
+  <text class="muted small" x="1362" y="493">exit 0 — no changes</text>
+  <text class="muted small" x="1362" y="514">exit 2 — changes</text>
+  <text class="muted small" x="1362" y="535">exit 1 — error</text>
+
+  <!-- M1 dashed -->
+  <rect x="1100" y="600" width="460" height="100" rx="14" fill="#F8FAFC" stroke="#94A3B8" stroke-width="1.5" stroke-dasharray="7 6"/>
+  <text class="faint card-title" x="1122" y="636">M1: apply · prune · health</text>
+  <text class="faint small" x="1122" y="660">The first milestone allowed to mutate the cluster.</text>
+  <path class="arrow-muted" d="M1450 570 L1450 592" marker-end="url(#arrow-muted)"/>
+  <text class="faint small" x="1460" y="587">next</text>
+
+  <!-- Legend -->
+  <line x1="48" y1="748" x2="92" y2="748" stroke="#475569" stroke-width="1.8"/>
+  <text class="muted small" x="102" y="753">implemented in M0</text>
+  <line x1="250" y1="748" x2="294" y2="748" stroke="#94A3B8" stroke-width="1.8" stroke-dasharray="6 6"/>
+  <text class="muted small" x="304" y="753">future milestone</text>
+
+  <!-- Footer -->
+  <text class="faint small" x="48" y="862">Registry polling is not planned: CI builds the image and commits the digest to the deploy repository overlay.</text>
+  <text class="faint small" x="48" y="884">The plan is the contract between diff and apply.</text>
+</svg>
