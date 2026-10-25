@@ -93,7 +93,7 @@ func (r *Runtime) Inspect(ctx context.Context, scope runtime.Scope) (runtime.Obs
 		observed.Networks = append(observed.Networks, desired.Network{
 			Name:       item.Name,
 			Driver:     driver,
-			DriverOpts: maps.Clone(item.Options),
+			DriverOpts: networkOptions(item.Options),
 			Attachable: item.Attachable,
 			Internal:   item.Internal,
 			Labels:     maps.Clone(item.Labels),
@@ -142,6 +142,28 @@ func (r *Runtime) Inspect(ctx context.Context, scope runtime.Scope) (runtime.Obs
 func inScope(labels map[string]string, scope runtime.Scope) bool {
 	return labels[desired.LabelApplication] == scope.Application &&
 		labels[desired.LabelTarget] == scope.Target
+}
+
+// runtimeNetworkOption is assigned by Swarm when an overlay network is
+// created. It is not declarative state, so Inspect strips it before the diff
+// engine sees it.
+const runtimeNetworkOption = "com.docker.network.driver.overlay.vxlanid_list"
+
+func networkOptions(options map[string]string) map[string]string {
+	if len(options) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(options))
+	for key, value := range options {
+		if key == runtimeNetworkOption {
+			continue
+		}
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func filterByScope[T any](items []T, labels func(T) map[string]string, scope runtime.Scope) []T {

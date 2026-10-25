@@ -13,9 +13,9 @@ image digest back to the deploy repository.
 
 ## Status
 
-Early development. Compose/overlay rendering (`wormcd render`) and read-only
-Swarm inspection are implemented; planning (`wormcd diff`) and reconciliation
-are next.
+Early development. Compose/overlay rendering (`wormcd render`), read-only
+Swarm inspection and read-only planning (`wormcd diff`) are implemented;
+reconciliation (apply) is next.
 
 ## Development
 
@@ -42,16 +42,32 @@ Render an application from a deploy repository (read-only, no cluster needed):
 ./bin/wormcd render --file deploy/apps/web/wormcd.yaml --target prod --output json
 ```
 
+Plan a target against a Swarm cluster (read-only):
+
+```sh
+./bin/wormcd diff --app web/prod --root /path/to/deploy-repo
+./bin/wormcd diff --app web/prod --root /path/to/deploy-repo --output json
+```
+
+`diff` connects to `unix:///var/run/docker.sock` by default. Use `--endpoint`
+(or `WORMCD_DOCKER_ENDPOINT`) and `--ca`/`--cert`/`--key` (or
+`WORMCD_DOCKER_CA`/`WORMCD_DOCKER_CERT`/`WORMCD_DOCKER_KEY`) for a remote
+manager over mTLS. Exit codes: `0` — no differences, `2` — the plan has
+changes, `1` — error.
+
 Unit tests are hermetic. Docker integration tests are opt-in:
 
 ```sh
 WORMCD_INTEGRATION=1 go test ./internal/cluster -run TestIntegrationPing -v
 WORMCD_INTEGRATION=1 go test ./internal/runtime/swarm -run TestIntegrationInspect -v
+WORMCD_INTEGRATION=1 go test ./cmd/wormcd -run TestIntegrationDiff -v
 ```
 
-`TestIntegrationInspect` is read-only. `TestIntegrationInspectStack` creates a
-disposable labelled stack and removes it again; both skip unless the daemon is
-a Swarm manager.
+`TestIntegrationInspect` is read-only. `TestIntegrationInspectStack` and
+`TestIntegrationDiff` create a disposable labelled stack, run the operation and
+remove it again; both skip unless the daemon is a Swarm manager. The diff stand
+is also available for manual runs — see
+[cmd/wormcd/testdata/stand/README.md](cmd/wormcd/testdata/stand/README.md).
 
 For a remote daemon or a dind Swarm, point the tests at it with mTLS:
 

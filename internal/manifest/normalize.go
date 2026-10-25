@@ -31,6 +31,11 @@ type normalizer struct {
 	out *desired.Desired
 }
 
+// swarmVXLANDriverOpt is assigned by Swarm when an overlay network is
+// created. Letting it through would make the desired state depend on a runtime
+// detail and produce permanent drift.
+const swarmVXLANDriverOpt = "com.docker.network.driver.overlay.vxlanid_list"
+
 func normalize(project *types.Project, app string, target Target, namespace, baseDir string) (*desired.Desired, error) {
 	if err := checkProject(project); err != nil {
 		return nil, err
@@ -92,6 +97,10 @@ func (n *normalizer) network(key string, cfg types.NetworkConfig) (desired.Netwo
 		}
 		name := firstNonEmpty(cfg.Name, key)
 		return desired.Network{Name: name, External: true}, nil
+	}
+
+	if _, ok := cfg.DriverOpts[swarmVXLANDriverOpt]; ok {
+		return desired.Network{}, fmt.Errorf("network %q: driver option %q is assigned by Swarm", key, swarmVXLANDriverOpt)
 	}
 
 	if !zeroIPAM(cfg.Ipam) {

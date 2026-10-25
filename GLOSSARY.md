@@ -34,6 +34,10 @@ Environment — логическое окружение (`staging`, `prod`). Ove
 
 Процесс приведения observed к desired: diff → apply → health → запись ревизии. Может быть автоматическим (по коммиту/интервалу) или ручным.
 
+## Plan
+
+Упорядоченный результат diff между Desired и Observed: для каждого объекта `kind/name` действие `Create`, `Update`, `Delete` или `Noop`. Plan строится read-only и служит входом для apply.
+
 ## Revision
 
 Запись об успешном (или завершившемся ошибкой) sync: commit, полностью отрендеренный манифест, digest-ы образов. Основа для истории, diff-а и rollback.

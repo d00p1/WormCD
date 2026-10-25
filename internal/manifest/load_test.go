@@ -215,6 +215,24 @@ func TestLoadRejectsUnsupportedField(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsSwarmManagedNetworkOption(t *testing.T) {
+	path := writeApp(t, "", map[string]string{
+		"compose.yaml": `services:
+  web:
+    image: ghcr.io/d00p1/web:v1
+    networks: [backend]
+networks:
+  backend:
+    driver_opts:
+      com.docker.network.driver.overlay.vxlanid_list: "4098"
+`,
+	})
+	_, err := Load(context.Background(), Options{File: path})
+	if err == nil || !strings.Contains(err.Error(), "assigned by Swarm") {
+		t.Fatalf("error = %v, want a driver-option rejection", err)
+	}
+}
+
 func TestLoadRejectsUntaggedImage(t *testing.T) {
 	path := writeApp(t, "", map[string]string{
 		"compose.yaml": `services:

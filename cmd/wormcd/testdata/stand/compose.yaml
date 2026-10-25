@@ -1,0 +1,5 @@
+services:
+  web:
+    image: ghcr.io/d00p1/wormcd-demo:v1
+    deploy:
+      replicas: 0

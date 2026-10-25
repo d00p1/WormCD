@@ -6,21 +6,31 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/d00p1/wormcd/internal/api"
+	"github.com/d00p1/wormcd/internal/cluster"
 	"github.com/d00p1/wormcd/internal/desired"
 	"github.com/d00p1/wormcd/internal/manifest"
+	"github.com/d00p1/wormcd/internal/reconcile"
+	"github.com/d00p1/wormcd/internal/runtime"
+	"github.com/d00p1/wormcd/internal/runtime/swarm"
 	"github.com/d00p1/wormcd/internal/version"
 )
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
+		var exit *exitError
+		if errors.As(err, &exit) {
+			os.Exit(exit.code)
+		}
 		_, _ = fmt.Fprintf(os.Stderr, "wormcd: %v\n", err)
 		os.Exit(1)
 	}
@@ -176,9 +186,20 @@ func printDesired(state *desired.Desired) {
 }
 
 func runDiff(args []string) error {
+	return runDiffTo(args, os.Stdout)
+}
+
+// runDiffTo builds a read-only plan. Exit code 2 means "changes detected";
+// errors still exit with 1.
+func runDiffTo(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("diff", flag.ContinueOnError)
 	app := fs.String("app", "", "application target, e.g. web/prod")
+	root := fs.String("root", ".", "deploy repository root used by --app")
 	output := fs.String("output", "human", "output format: human or json")
+	endpoint := fs.String("endpoint", envOr("WORMCD_DOCKER_ENDPOINT", "unix:///var/run/docker.sock"), "Docker Engine endpoint")
+	ca := fs.String("ca", os.Getenv("WORMCD_DOCKER_CA"), "CA file for a tcp:// endpoint")
+	cert := fs.String("cert", os.Getenv("WORMCD_DOCKER_CERT"), "client certificate for a tcp:// endpoint")
+	key := fs.String("key", os.Getenv("WORMCD_DOCKER_KEY"), "client key for a tcp:// endpoint")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -188,5 +209,81 @@ func runDiff(args []string) error {
 	if *output != "human" && *output != "json" {
 		return fmt.Errorf("diff: unsupported output format %q", *output)
 	}
-	return fmt.Errorf("diff for %s: not implemented yet (issue #4)", *app)
+
+	ctx := context.Background()
+	state, err := manifest.Load(ctx, manifest.Options{App: *app, Root: *root})
+	if err != nil {
+		return err
+	}
+
+	// M0 has no cluster registry yet: connect to the endpoint given on the
+	// command line. spec.targets[].cluster is informational until M2.
+	engine, err := cluster.New(cluster.Config{
+		Name:     *app,
+		Endpoint: *endpoint,
+		CAFile:   *ca,
+		CertFile: *cert,
+		KeyFile:  *key,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = engine.Close() }()
+
+	observed, err := swarm.New(engine).Inspect(ctx, runtime.Scope{
+		Application: state.Application,
+		Target:      state.Target,
+	})
+	if err != nil {
+		return err
+	}
+
+	plan := reconcile.Diff(state, observed)
+	if *output == "json" {
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(plan); err != nil {
+			return err
+		}
+	} else {
+		printPlan(stdout, plan)
+	}
+
+	if plan.HasChanges() {
+		return &exitError{code: 2}
+	}
+	return nil
 }
+
+func printPlan(w io.Writer, plan reconcile.Plan) {
+	_, _ = fmt.Fprintf(w, "plan for %s/%s (%s)\n", plan.Application, plan.Target, plan.Namespace)
+	if len(plan.Entries) == 0 {
+		_, _ = fmt.Fprintln(w, "  no managed objects")
+	}
+	for _, entry := range plan.Entries {
+		line := fmt.Sprintf("  %-6s  %s", entry.Action, entry.Key)
+		if len(entry.Changes) > 0 {
+			line += " (" + strings.Join(entry.Changes, ", ") + ")"
+		}
+		_, _ = fmt.Fprintln(w, line)
+	}
+	_, _ = fmt.Fprintf(w, "%d create, %d update, %d delete, %d noop\n",
+		plan.Summary.Create, plan.Summary.Update, plan.Summary.Delete, plan.Summary.Noop)
+	if !plan.HasChanges() {
+		_, _ = fmt.Fprintln(w, "in sync")
+	}
+}
+
+func envOr(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
+}
+
+// exitError carries a process exit code without printing an extra message.
+type exitError struct {
+	code int
+}
+
+func (e *exitError) Error() string { return fmt.Sprintf("exit status %d", e.code) }
