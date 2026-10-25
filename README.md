@@ -13,4 +13,22 @@ image digest back to the deploy repository.
 
 ## Status
 
-Early design. No code yet.
+Early development. The control plane skeleton, Docker SDK connection layer and
+`wormcd version` / `wormcd server` commands exist; reconciliation is not
+implemented yet.
+
+## Development
+
+Requires Go 1.27+.
+
+```sh
+make build
+./bin/wormcd version
+./bin/wormcd server --listen :8080   # GET /healthz
+```
+
+Unit tests are hermetic. The Docker integration test is opt-in:
+
+```sh
+WORMCD_INTEGRATION=1 go test ./internal/cluster -run TestIntegrationPing -v
+```
