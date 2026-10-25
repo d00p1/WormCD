@@ -13,9 +13,9 @@ image digest back to the deploy repository.
 
 ## Status
 
-Early development. The control plane skeleton, Docker SDK connection layer and
-`wormcd version` / `wormcd server` commands exist; reconciliation is not
-implemented yet.
+Early development. Compose/overlay rendering (`wormcd render`) and read-only
+Swarm inspection are implemented; planning (`wormcd diff`) and reconciliation
+are next.
 
 ## Development
 
@@ -34,8 +34,12 @@ Render an application from a deploy repository (read-only, no cluster needed):
 ./bin/wormcd render --file deploy/apps/web/wormcd.yaml --target prod --output json
 ```
 
-Unit tests are hermetic. The Docker integration test is opt-in:
+Unit tests are hermetic. Docker integration tests are opt-in:
 
 ```sh
 WORMCD_INTEGRATION=1 go test ./internal/cluster -run TestIntegrationPing -v
+WORMCD_INTEGRATION=1 go test ./internal/runtime/swarm -run TestIntegrationInspect -v
 ```
+
+The second test skips unless the daemon is a Swarm manager, and it never
+mutates the cluster.
