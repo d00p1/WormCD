@@ -1,5 +1,7 @@
 # WormCD
 
+![WormCD: a worm in a helmet commanding a swarm of drones, each carrying a container](docs/assets/wormcd-hero.svg)
+
 Declarative continuous delivery for Docker Swarm clusters.
 
 WormCD watches a Git repository, renders Compose files with per-environment

@@ -1,0 +1,221 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="660" viewBox="0 0 1600 660" role="img" aria-labelledby="title desc">
+  <title id="title">WormCD — a worm commanding a swarm of container drones</title>
+  <desc id="desc">A cartoon worm in a helmet holds a swarm console while many drones carry container boxes across the sky.</desc>
+
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#E0F2FE"/>
+      <stop offset="0.65" stop-color="#F0F9FF"/>
+      <stop offset="1" stop-color="#F8FAFC"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.22" cy="0.55" r="0.45">
+      <stop offset="0" stop-color="#BBF7D0" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#BBF7D0" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="bodyGreen" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4ADE80"/>
+      <stop offset="1" stop-color="#22C55E"/>
+    </linearGradient>
+    <linearGradient id="containerFront" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#38BDF8"/>
+      <stop offset="1" stop-color="#0EA5E9"/>
+    </linearGradient>
+
+    <!-- One drone with a slung container, centred on the drone body. -->
+    <g id="drone">
+      <!-- rotor wash -->
+      <g fill="#E2E8F0" fill-opacity="0.55" stroke="#94A3B8" stroke-width="3">
+        <ellipse cx="-64" cy="-30" rx="31" ry="7"/>
+        <ellipse cx="64" cy="-30" rx="31" ry="7"/>
+        <ellipse cx="-64" cy="30" rx="31" ry="7"/>
+        <ellipse cx="64" cy="30" rx="31" ry="7"/>
+      </g>
+      <g fill="none" stroke="#64748B" stroke-width="2.5" stroke-dasharray="4 7" opacity="0.8">
+        <ellipse cx="-64" cy="-30" rx="22" ry="4"/>
+        <ellipse cx="64" cy="-30" rx="22" ry="4"/>
+        <ellipse cx="-64" cy="30" rx="22" ry="4"/>
+        <ellipse cx="64" cy="30" rx="22" ry="4"/>
+      </g>
+
+      <!-- arms -->
+      <g stroke="#0F172A" stroke-width="9" stroke-linecap="round">
+        <line x1="-22" y1="-12" x2="-64" y2="-30"/>
+        <line x1="22" y1="-12" x2="64" y2="-30"/>
+        <line x1="-22" y1="12" x2="-64" y2="30"/>
+        <line x1="22" y1="12" x2="64" y2="30"/>
+      </g>
+
+      <!-- hull -->
+      <rect x="-34" y="-20" width="68" height="40" rx="14" fill="#1E293B" stroke="#0F172A" stroke-width="4"/>
+      <rect x="-26" y="-14" width="52" height="12" rx="6" fill="#334155"/>
+      <rect x="-22" y="0" width="44" height="7" rx="3.5" fill="#F97316"/>
+      <circle cx="-24" cy="-7" r="3" fill="#22C55E"/>
+      <circle cx="0" cy="23" r="9" fill="#0F172A"/>
+      <circle cx="0" cy="23" r="3.5" fill="#38BDF8"/>
+
+      <!-- sling -->
+      <g stroke="#0F172A" stroke-width="4" stroke-linecap="round">
+        <line x1="-20" y1="20" x2="-20" y2="42"/>
+        <line x1="20" y1="20" x2="20" y2="42"/>
+      </g>
+
+      <!-- container, isometric-ish -->
+      <path d="M-50 42 L-36 30 L62 30 L48 42 Z" fill="#7DD3FC" stroke="#075985" stroke-width="4" stroke-linejoin="round"/>
+      <path d="M48 42 L62 30 L62 88 L48 100 Z" fill="#0284C7" stroke="#075985" stroke-width="4" stroke-linejoin="round"/>
+      <rect x="-50" y="42" width="98" height="58" rx="5" fill="url(#containerFront)" stroke="#075985" stroke-width="4"/>
+      <g stroke="#075985" stroke-width="2.5" opacity="0.45">
+        <path d="M-34 54 V88"/>
+        <path d="M-18 54 V88"/>
+        <path d="M-2 54 V88"/>
+        <path d="M14 54 V88"/>
+        <path d="M30 54 V88"/>
+      </g>
+      <rect x="-44" y="70" width="30" height="20" rx="3" fill="#E0F2FE" fill-opacity="0.9"/>
+      <g stroke="#0369A1" stroke-width="2" stroke-linecap="round">
+        <path d="M-39 75 H-19"/>
+        <path d="M-39 80 H-19"/>
+        <path d="M-39 85 H-28"/>
+      </g>
+      <circle cx="40" cy="54" r="3" fill="#E0F2FE"/>
+    </g>
+
+    <g id="cloud">
+      <ellipse cx="0" cy="0" rx="70" ry="24" fill="#FFFFFF" fill-opacity="0.75"/>
+      <ellipse cx="-34" cy="-10" rx="34" ry="24" fill="#FFFFFF" fill-opacity="0.75"/>
+      <ellipse cx="26" cy="-12" rx="40" ry="26" fill="#FFFFFF" fill-opacity="0.75"/>
+    </g>
+  </defs>
+
+  <!-- stage -->
+  <rect width="1600" height="660" rx="28" fill="url(#sky)"/>
+  <rect width="1600" height="660" rx="28" fill="url(#glow)"/>
+
+  <!-- clouds -->
+  <use href="#cloud" transform="translate(620 540) scale(1.1)"/>
+  <use href="#cloud" transform="translate(1080 585) scale(0.85)"/>
+  <use href="#cloud" transform="translate(1410 525) scale(0.7)"/>
+  <use href="#cloud" transform="translate(880 90) scale(0.6)"/>
+
+  <!-- control links from the console -->
+  <g fill="none" stroke="#475569" stroke-width="2" stroke-dasharray="5 8" opacity="0.33">
+    <path d="M352 486 C500 470 560 390 620 350"/>
+    <path d="M352 486 C520 460 700 330 800 240"/>
+    <path d="M352 486 C560 470 860 360 1010 270"/>
+    <path d="M352 486 C700 500 1000 430 1190 390"/>
+    <path d="M352 486 C760 520 1120 540 1300 520"/>
+    <path d="M352 486 C820 470 1200 300 1370 240"/>
+  </g>
+
+  <!-- flight trails -->
+  <g stroke="#94A3B8" stroke-width="3" stroke-linecap="round" opacity="0.35">
+    <path d="M540 340 H610"/>
+    <path d="M760 140 H820"/>
+    <path d="M940 92 H1000"/>
+    <path d="M1280 172 H1340"/>
+    <path d="M1410 372 H1470"/>
+    <path d="M1230 484 H1290"/>
+  </g>
+
+  <!-- fleet, back to front -->
+  <use href="#drone" transform="translate(1540 270) scale(0.45)"/>
+  <use href="#drone" transform="translate(1120 100) scale(0.55)"/>
+  <use href="#drone" transform="translate(800 150) scale(0.62)"/>
+  <use href="#drone" transform="translate(650 330) scale(0.55)"/>
+  <use href="#drone" transform="translate(900 420) scale(0.5)"/>
+  <use href="#drone" transform="translate(1380 180) scale(0.78)"/>
+  <use href="#drone" transform="translate(1480 380) scale(0.68)"/>
+  <use href="#drone" transform="translate(1300 480) scale(0.58)"/>
+  <use href="#drone" transform="translate(1000 200) scale(0.9)"/>
+
+  <!-- hero drone -->
+  <use href="#drone" transform="translate(1200 300) scale(1.18)"/>
+
+  <!-- ground shadow -->
+  <ellipse cx="292" cy="628" rx="150" ry="18" fill="#0F172A" opacity="0.08"/>
+
+  <!-- worm -->
+  <g transform="translate(280 352) scale(0.85)">
+    <!-- tail body -->
+    <path d="M0 52 C28 112 -32 142 -27 198 C-23 246 26 258 16 296 C11 320 -14 326 -30 316"
+          fill="none" stroke="#14532D" stroke-width="78" stroke-linecap="round"/>
+    <path d="M0 52 C28 112 -32 142 -27 198 C-23 246 26 258 16 296 C11 320 -14 326 -30 316"
+          fill="none" stroke="url(#bodyGreen)" stroke-width="66" stroke-linecap="round"/>
+    <!-- segment creases -->
+    <g fill="none" stroke="#16A34A" stroke-width="4" stroke-linecap="round" opacity="0.6">
+      <path d="M-26 122 Q0 132 24 120"/>
+      <path d="M-32 174 Q-4 186 22 174"/>
+      <path d="M-22 228 Q6 240 30 226"/>
+      <path d="M-18 280 Q6 290 28 278"/>
+    </g>
+
+    <!-- left arm (behind console) -->
+    <path d="M-34 54 C-72 66 -86 92 -78 112" fill="none" stroke="#14532D" stroke-width="30" stroke-linecap="round"/>
+    <path d="M-34 54 C-72 66 -86 92 -78 112" fill="none" stroke="#22C55E" stroke-width="22" stroke-linecap="round"/>
+
+    <!-- head -->
+    <circle cx="0" cy="0" r="62" fill="url(#bodyGreen)" stroke="#14532D" stroke-width="6"/>
+    <!-- cheeks -->
+    <circle cx="-40" cy="16" r="9" fill="#FB7185" opacity="0.4"/>
+    <circle cx="40" cy="16" r="9" fill="#FB7185" opacity="0.4"/>
+    <!-- eyes -->
+    <ellipse cx="-23" cy="-12" rx="16" ry="20" fill="#FFFFFF" stroke="#14532D" stroke-width="3"/>
+    <ellipse cx="23" cy="-12" rx="16" ry="20" fill="#FFFFFF" stroke="#14532D" stroke-width="3"/>
+    <circle cx="-18" cy="-8" r="7" fill="#0F172A"/>
+    <circle cx="28" cy="-8" r="7" fill="#0F172A"/>
+    <circle cx="-16" cy="-10" r="2.5" fill="#FFFFFF"/>
+    <circle cx="30" cy="-10" r="2.5" fill="#FFFFFF"/>
+    <!-- smile -->
+    <path d="M-17 20 Q0 34 19 18" fill="none" stroke="#14532D" stroke-width="4" stroke-linecap="round"/>
+
+    <!-- helmet -->
+    <path d="M-63 -22 A63 63 0 0 1 63 -22 L63 -14 L-63 -14 Z" fill="#334155" stroke="#0F172A" stroke-width="5" stroke-linejoin="round"/>
+    <rect x="-74" y="-28" width="148" height="14" rx="7" fill="#1E293B" stroke="#0F172A" stroke-width="4"/>
+    <circle cx="0" cy="-62" r="14" fill="#F97316" stroke="#7C2D12" stroke-width="3"/>
+    <text x="0" y="-57" text-anchor="middle" font-family="Inter, 'DejaVu Sans', sans-serif" font-size="15" font-weight="700" fill="#FFFFFF">W</text>
+    <!-- antenna -->
+    <path d="M42 -72 L54 -94" stroke="#0F172A" stroke-width="3" stroke-linecap="round"/>
+    <circle cx="55" cy="-97" r="4" fill="#F97316" stroke="#7C2D12" stroke-width="2"/>
+    <g fill="none" stroke="#F97316" stroke-width="2.5" stroke-linecap="round" opacity="0.8">
+      <path d="M64 -103 A14 14 0 0 1 64 -91"/>
+      <path d="M71 -108 A22 22 0 0 1 71 -86"/>
+    </g>
+
+    <!-- right arm (in front) -->
+    <path d="M36 54 C80 62 96 84 92 106" fill="none" stroke="#14532D" stroke-width="30" stroke-linecap="round"/>
+    <path d="M36 54 C80 62 96 84 92 106" fill="none" stroke="#22C55E" stroke-width="22" stroke-linecap="round"/>
+
+    <!-- console -->
+    <g transform="translate(6 112) rotate(-7)">
+      <rect x="-78" y="-10" width="156" height="102" rx="14" fill="#1E293B" stroke="#0F172A" stroke-width="5"/>
+      <rect x="-66" y="1" width="132" height="79" rx="7" fill="#0F172A"/>
+      <!-- swarm map: nine container tiles -->
+      <g>
+        <rect x="-56" y="10" width="24" height="18" rx="4" fill="#22C55E"/>
+        <rect x="-24" y="10" width="24" height="18" rx="4" fill="#38BDF8"/>
+        <rect x="8" y="10" width="24" height="18" rx="4" fill="#F97316"/>
+        <rect x="-56" y="36" width="24" height="18" rx="4" fill="#38BDF8"/>
+        <rect x="-24" y="36" width="24" height="18" rx="4" fill="#22C55E"/>
+        <rect x="8" y="36" width="24" height="18" rx="4" fill="#22C55E"/>
+        <rect x="-56" y="62" width="24" height="18" rx="4" fill="#F97316"/>
+        <rect x="-24" y="62" width="24" height="18" rx="4" fill="#38BDF8"/>
+        <rect x="8" y="62" width="24" height="18" rx="4" fill="#22C55E"/>
+      </g>
+      <g fill="#E2E8F0">
+        <circle cx="54" cy="14" r="2.5"/>
+        <circle cx="54" cy="22" r="2.5"/>
+        <circle cx="54" cy="30" r="2.5"/>
+      </g>
+      <path d="M50 74 h10 M55 69 v10" stroke="#E2E8F0" stroke-width="2" opacity="0.5"/>
+    </g>
+    <!-- hands over console edges -->
+    <circle cx="-72" cy="118" r="12" fill="#22C55E" stroke="#14532D" stroke-width="4"/>
+    <circle cx="86" cy="110" r="12" fill="#22C55E" stroke="#14532D" stroke-width="4"/>
+  </g>
+
+  <!-- sparks / packets -->
+  <g fill="#F97316" opacity="0.8">
+    <circle cx="470" cy="250" r="4"/>
+    <circle cx="530" cy="220" r="3"/>
+    <circle cx="580" cy="390" r="3"/>
+  </g>
+</svg>
