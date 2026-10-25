@@ -305,6 +305,22 @@ func TestLoadByApp(t *testing.T) {
 	}
 }
 
+func TestLoadWithCluster(t *testing.T) {
+	state, clusterName, err := LoadWithCluster(context.Background(), Options{
+		App:  "web/prod",
+		Root: filepath.Join("testdata"),
+	})
+	if err != nil {
+		t.Fatalf("LoadWithCluster: %v", err)
+	}
+	if state.Application != "web" || state.Target != "prod" {
+		t.Fatalf("application/target = %s/%s, want web/prod", state.Application, state.Target)
+	}
+	if clusterName != "prod-1" {
+		t.Fatalf("cluster = %q, want prod-1", clusterName)
+	}
+}
+
 func TestLoadByAppNotFound(t *testing.T) {
 	_, err := Load(context.Background(), Options{
 		App:  "missing/prod",

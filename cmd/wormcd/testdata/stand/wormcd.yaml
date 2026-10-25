@@ -1,0 +1,9 @@
+apiVersion: wormcd.dev/v1alpha1
+kind: Application
+metadata:
+  name: web
+spec:
+  compose: compose.yaml
+  targets:
+    - name: prod
+      cluster: local

@@ -147,8 +147,11 @@ func TestInspect(t *testing.T) {
 				Name:       "wormcd_web_prod_default",
 				Driver:     "overlay",
 				Attachable: true,
-				Options:    map[string]string{"com.docker.network.driver.mtu": "1450"},
-				Labels:     labels,
+				Options: map[string]string{
+					"com.docker.network.driver.mtu": "1450",
+					runtimeNetworkOption:            "4099",
+				},
+				Labels: labels,
 			}},
 			{Network: network.Network{
 				ID:     "net2",
@@ -277,6 +280,9 @@ func TestInspect(t *testing.T) {
 	}
 	if observed.Networks[0].DriverOpts["com.docker.network.driver.mtu"] != "1450" || !observed.Networks[0].Attachable {
 		t.Errorf("network = %+v", observed.Networks[0])
+	}
+	if _, ok := observed.Networks[0].DriverOpts[runtimeNetworkOption]; ok {
+		t.Errorf("runtime-assigned driver option %q leaked into observed state", runtimeNetworkOption)
 	}
 	if len(observed.Configs) != 1 || observed.Configs[0].Name != "wormcd_web_prod_nginx_abc" {
 		t.Errorf("observed configs = %+v", observed.Configs)

@@ -6,21 +6,31 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/d00p1/wormcd/internal/api"
+	"github.com/d00p1/wormcd/internal/cluster"
 	"github.com/d00p1/wormcd/internal/desired"
 	"github.com/d00p1/wormcd/internal/manifest"
+	"github.com/d00p1/wormcd/internal/reconcile"
+	"github.com/d00p1/wormcd/internal/runtime"
+	"github.com/d00p1/wormcd/internal/runtime/swarm"
 	"github.com/d00p1/wormcd/internal/version"
 )
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
+		var exit *exitError
+		if errors.As(err, &exit) {
+			os.Exit(exit.code)
+		}
 		_, _ = fmt.Fprintf(os.Stderr, "wormcd: %v\n", err)
 		os.Exit(1)
 	}
@@ -176,8 +186,38 @@ func printDesired(state *desired.Desired) {
 }
 
 func runDiff(args []string) error {
+	return runDiffTo(args, os.Stdout)
+}
+
+// diffInspector is the only part of a runtime the diff command may use.
+// Keeping it this narrow makes mutating Docker calls impossible in the diff
+// path by construction.
+type diffInspector interface {
+	Inspect(context.Context, runtime.Scope) (runtime.Observed, error)
+}
+
+func connectInspector(cfg cluster.Config) (diffInspector, func(), error) {
+	engine, err := cluster.New(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	return swarm.New(engine), func() { _ = engine.Close() }, nil
+}
+
+// runDiffTo builds a read-only plan. Exit code 2 means "changes detected";
+// errors still exit with 1.
+func runDiffTo(args []string, stdout io.Writer) error {
+	return runDiffWith(args, stdout, connectInspector)
+}
+
+func runDiffWith(
+	args []string,
+	stdout io.Writer,
+	connect func(cluster.Config) (diffInspector, func(), error),
+) error {
 	fs := flag.NewFlagSet("diff", flag.ContinueOnError)
 	app := fs.String("app", "", "application target, e.g. web/prod")
+	root := fs.String("root", ".", "deploy repository root used by --app")
 	output := fs.String("output", "human", "output format: human or json")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -188,5 +228,72 @@ func runDiff(args []string) error {
 	if *output != "human" && *output != "json" {
 		return fmt.Errorf("diff: unsupported output format %q", *output)
 	}
-	return fmt.Errorf("diff for %s: not implemented yet (issue #4)", *app)
+
+	ctx := context.Background()
+	state, clusterName, err := manifest.LoadWithCluster(ctx, manifest.Options{App: *app, Root: *root})
+	if err != nil {
+		return err
+	}
+
+	// M0 has no cluster registry yet: the local Swarm is the only supported
+	// target. The cluster name is still resolved so errors name the right
+	// cluster; the endpoint becomes configurable when the registry arrives.
+	inspector, closeInspector, err := connect(cluster.Config{
+		Name:     clusterName,
+		Endpoint: "unix:///var/run/docker.sock",
+	})
+	if err != nil {
+		return err
+	}
+	defer closeInspector()
+
+	observed, err := inspector.Inspect(ctx, runtime.Scope{
+		Application: state.Application,
+		Target:      state.Target,
+	})
+	if err != nil {
+		return err
+	}
+
+	plan := reconcile.Diff(state, observed)
+	if *output == "json" {
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(plan); err != nil {
+			return err
+		}
+	} else {
+		printPlan(stdout, plan)
+	}
+
+	if plan.HasChanges() {
+		return &exitError{code: 2}
+	}
+	return nil
 }
+
+func printPlan(w io.Writer, plan runtime.Plan) {
+	_, _ = fmt.Fprintf(w, "plan for %s/%s (%s)\n", plan.Application, plan.Target, plan.Namespace)
+	if len(plan.Entries) == 0 {
+		_, _ = fmt.Fprintln(w, "  no managed objects")
+	}
+	for _, entry := range plan.Entries {
+		line := fmt.Sprintf("  %-6s  %s", entry.Action, entry.Key)
+		if len(entry.Changes) > 0 {
+			line += " (" + strings.Join(entry.Changes, ", ") + ")"
+		}
+		_, _ = fmt.Fprintln(w, line)
+	}
+	_, _ = fmt.Fprintf(w, "%d create, %d update, %d delete, %d noop\n",
+		plan.Summary.Create, plan.Summary.Update, plan.Summary.Delete, plan.Summary.Noop)
+	if !plan.HasChanges() {
+		_, _ = fmt.Fprintln(w, "in sync")
+	}
+}
+
+// exitError carries a process exit code without printing an extra message.
+type exitError struct {
+	code int
+}
+
+func (e *exitError) Error() string { return fmt.Sprintf("exit status %d", e.code) }

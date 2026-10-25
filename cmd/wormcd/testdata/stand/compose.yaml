@@ -1,0 +1,28 @@
+services:
+  web:
+    image: ghcr.io/d00p1/wormcd-demo:v1
+    ports:
+      - "8080:80"
+    configs:
+      - source: app
+        target: /etc/wormcd/config
+    secrets:
+      - source: tls
+        target: /run/secrets/tls
+    volumes:
+      - data:/data
+    deploy:
+      replicas: 0
+
+configs:
+  app:
+    content: |
+      stand
+
+secrets:
+  tls:
+    external: true
+    name: prod_tls
+
+volumes:
+  data: {}
