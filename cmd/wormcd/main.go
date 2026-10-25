@@ -189,17 +189,36 @@ func runDiff(args []string) error {
 	return runDiffTo(args, os.Stdout)
 }
 
+// diffInspector is the only part of a runtime the diff command may use.
+// Keeping it this narrow makes mutating Docker calls impossible in the diff
+// path by construction.
+type diffInspector interface {
+	Inspect(context.Context, runtime.Scope) (runtime.Observed, error)
+}
+
+func connectInspector(cfg cluster.Config) (diffInspector, func(), error) {
+	engine, err := cluster.New(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	return swarm.New(engine), func() { _ = engine.Close() }, nil
+}
+
 // runDiffTo builds a read-only plan. Exit code 2 means "changes detected";
 // errors still exit with 1.
 func runDiffTo(args []string, stdout io.Writer) error {
+	return runDiffWith(args, stdout, connectInspector)
+}
+
+func runDiffWith(
+	args []string,
+	stdout io.Writer,
+	connect func(cluster.Config) (diffInspector, func(), error),
+) error {
 	fs := flag.NewFlagSet("diff", flag.ContinueOnError)
 	app := fs.String("app", "", "application target, e.g. web/prod")
 	root := fs.String("root", ".", "deploy repository root used by --app")
 	output := fs.String("output", "human", "output format: human or json")
-	endpoint := fs.String("endpoint", envOr("WORMCD_DOCKER_ENDPOINT", "unix:///var/run/docker.sock"), "Docker Engine endpoint")
-	ca := fs.String("ca", os.Getenv("WORMCD_DOCKER_CA"), "CA file for a tcp:// endpoint")
-	cert := fs.String("cert", os.Getenv("WORMCD_DOCKER_CERT"), "client certificate for a tcp:// endpoint")
-	key := fs.String("key", os.Getenv("WORMCD_DOCKER_KEY"), "client key for a tcp:// endpoint")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -211,26 +230,24 @@ func runDiffTo(args []string, stdout io.Writer) error {
 	}
 
 	ctx := context.Background()
-	state, err := manifest.Load(ctx, manifest.Options{App: *app, Root: *root})
+	state, clusterName, err := manifest.LoadWithCluster(ctx, manifest.Options{App: *app, Root: *root})
 	if err != nil {
 		return err
 	}
 
-	// M0 has no cluster registry yet: connect to the endpoint given on the
-	// command line. spec.targets[].cluster is informational until M2.
-	engine, err := cluster.New(cluster.Config{
-		Name:     *app,
-		Endpoint: *endpoint,
-		CAFile:   *ca,
-		CertFile: *cert,
-		KeyFile:  *key,
+	// M0 has no cluster registry yet: the local Swarm is the only supported
+	// target. The cluster name is still resolved so errors name the right
+	// cluster; the endpoint becomes configurable when the registry arrives.
+	inspector, closeInspector, err := connect(cluster.Config{
+		Name:     clusterName,
+		Endpoint: "unix:///var/run/docker.sock",
 	})
 	if err != nil {
 		return err
 	}
-	defer func() { _ = engine.Close() }()
+	defer closeInspector()
 
-	observed, err := swarm.New(engine).Inspect(ctx, runtime.Scope{
+	observed, err := inspector.Inspect(ctx, runtime.Scope{
 		Application: state.Application,
 		Target:      state.Target,
 	})
@@ -255,7 +272,7 @@ func runDiffTo(args []string, stdout io.Writer) error {
 	return nil
 }
 
-func printPlan(w io.Writer, plan reconcile.Plan) {
+func printPlan(w io.Writer, plan runtime.Plan) {
 	_, _ = fmt.Fprintf(w, "plan for %s/%s (%s)\n", plan.Application, plan.Target, plan.Namespace)
 	if len(plan.Entries) == 0 {
 		_, _ = fmt.Fprintln(w, "  no managed objects")
@@ -272,13 +289,6 @@ func printPlan(w io.Writer, plan reconcile.Plan) {
 	if !plan.HasChanges() {
 		_, _ = fmt.Fprintln(w, "in sync")
 	}
-}
-
-func envOr(name, fallback string) string {
-	if value := os.Getenv(name); value != "" {
-		return value
-	}
-	return fallback
 }
 
 // exitError carries a process exit code without printing an extra message.

@@ -150,20 +150,12 @@ func inScope(labels map[string]string, scope runtime.Scope) bool {
 const runtimeNetworkOption = "com.docker.network.driver.overlay.vxlanid_list"
 
 func networkOptions(options map[string]string) map[string]string {
+	options = maps.Clone(options)
+	delete(options, runtimeNetworkOption)
 	if len(options) == 0 {
 		return nil
 	}
-	out := make(map[string]string, len(options))
-	for key, value := range options {
-		if key == runtimeNetworkOption {
-			continue
-		}
-		out[key] = value
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
+	return options
 }
 
 func filterByScope[T any](items []T, labels func(T) map[string]string, scope runtime.Scope) []T {

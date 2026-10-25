@@ -8,91 +8,78 @@ import (
 	"github.com/d00p1/wormcd/internal/runtime"
 )
 
-// Action is what apply must do with one object.
-type Action string
-
-const (
-	Create Action = "Create"
-	Update Action = "Update"
-	Delete Action = "Delete"
-	Noop   Action = "Noop"
-)
-
-// Entry is one object in a plan. Key is "Kind/name"; Kind and Name are
-// repeated so machine consumers do not have to split it.
-type Entry struct {
-	Key     string       `json:"key"`
-	Kind    desired.Kind `json:"kind"`
-	Name    string       `json:"name"`
-	Action  Action       `json:"action"`
-	Changes []string     `json:"changes,omitempty"`
-}
-
-// Summary counts the actions in a plan.
-type Summary struct {
-	Create int `json:"create"`
-	Update int `json:"update"`
-	Delete int `json:"delete"`
-	Noop   int `json:"noop"`
-}
-
-// Plan is the ordered, read-only difference between desired and observed
-// state. Entries are grouped by kind in apply order and sorted by name inside
-// a kind, so the same inputs always produce the same plan.
-type Plan struct {
-	Application string  `json:"application"`
-	Target      string  `json:"target"`
-	Namespace   string  `json:"namespace"`
-	Summary     Summary `json:"summary"`
-	Entries     []Entry `json:"entries"`
-}
-
-// HasChanges reports whether applying the plan would mutate the cluster.
-func (p Plan) HasChanges() bool {
-	return p.Summary.Create > 0 || p.Summary.Update > 0 || p.Summary.Delete > 0
-}
-
 // Diff compares desired and observed state for one target. It is a pure
 // function: it never contacts a runtime, so it cannot mutate the cluster.
-func Diff(want *desired.Desired, have runtime.Observed) Plan {
-	plan := Plan{
-		Application: want.Application,
-		Target:      want.Target,
-		Namespace:   want.Namespace,
-		Entries:     make([]Entry, 0, 16),
+func Diff(desiredState *desired.Desired, observedState runtime.Observed) runtime.Plan {
+	plan := runtime.Plan{
+		Application: desiredState.Application,
+		Target:      desiredState.Target,
+		Namespace:   desiredState.Namespace,
+		Entries:     make([]runtime.Entry, 0, 16),
 	}
 
 	// Entries are grouped in dependency order, matching apply. Apply must
 	// still delete services before their dependencies; the order here is
 	// only about a stable, readable plan.
-	diffObjects(&plan, desired.KindNetwork, want.Networks, have.Networks, networkName, networkManaged, networkChanges)
-	diffObjects(&plan, desired.KindConfig, want.Configs, have.Configs, configName, configManaged, configChanges)
-	diffObjects(&plan, desired.KindSecret, want.Secrets, have.Secrets, secretName, secretManaged, secretChanges)
-	diffObjects(&plan, desired.KindVolume, want.Volumes, have.Volumes, volumeName, volumeManaged, volumeChanges)
-	diffObjects(&plan, desired.KindService, want.Services, have.Services, serviceName, nil, serviceChanges)
+	diffObjects(&plan, networkKind, desiredState.Networks, observedState.Networks)
+	diffObjects(&plan, configKind, desiredState.Configs, observedState.Configs)
+	diffObjects(&plan, secretKind, desiredState.Secrets, observedState.Secrets)
+	diffObjects(&plan, volumeKind, desiredState.Volumes, observedState.Volumes)
+	diffObjects(&plan, serviceKind, desiredState.Services, observedState.Services)
 
 	return plan
 }
 
-func diffObjects[T any](
-	plan *Plan,
-	kind desired.Kind,
-	want, have []T,
-	name func(T) string,
-	managed func(T) bool,
-	changes func(want, have T) []string,
-) {
-	desiredByName := make(map[string]T, len(want))
-	for _, item := range want {
-		if managed != nil && !managed(item) {
+// objectKind groups everything the diff needs for one kind of object.
+type objectKind[T desired.Managed] struct {
+	kind    desired.Kind
+	name    func(T) string
+	changes func(desiredObject, observedObject T) []string
+}
+
+var (
+	networkKind = objectKind[desired.Network]{
+		kind:    desired.KindNetwork,
+		name:    networkName,
+		changes: networkChanges,
+	}
+	configKind = objectKind[desired.Config]{
+		kind:    desired.KindConfig,
+		name:    configName,
+		changes: configChanges,
+	}
+	secretKind = objectKind[desired.Secret]{
+		kind:    desired.KindSecret,
+		name:    secretName,
+		changes: secretChanges,
+	}
+	volumeKind = objectKind[desired.Volume]{
+		kind:    desired.KindVolume,
+		name:    volumeName,
+		changes: volumeChanges,
+	}
+	serviceKind = objectKind[desired.Service]{
+		kind:    desired.KindService,
+		name:    serviceName,
+		changes: serviceChanges,
+	}
+)
+
+func diffObjects[T desired.Managed](plan *runtime.Plan, objectType objectKind[T], desiredObjects, observedObjects []T) {
+	desiredByName := make(map[string]T, len(desiredObjects))
+	for _, object := range desiredObjects {
+		if !object.Managed() {
 			continue
 		}
-		desiredByName[name(item)] = item
+		desiredByName[objectType.name(object)] = object
 	}
 
-	observedByName := make(map[string]T, len(have))
-	for _, item := range have {
-		observedByName[name(item)] = item
+	observedByName := make(map[string]T, len(observedObjects))
+	for _, object := range observedObjects {
+		if !object.Managed() {
+			continue
+		}
+		observedByName[objectType.name(object)] = object
 	}
 
 	names := make([]string, 0, len(desiredByName)+len(observedByName))
@@ -107,148 +94,118 @@ func diffObjects[T any](
 	sort.Strings(names)
 
 	for _, itemName := range names {
-		wantItem, inDesired := desiredByName[itemName]
-		haveItem, inObserved := observedByName[itemName]
+		desiredObject, inDesired := desiredByName[itemName]
+		observedObject, inObserved := observedByName[itemName]
 
-		entry := Entry{
-			Key:  desired.Key{Kind: kind, Name: itemName}.String(),
-			Kind: kind,
-			Name: itemName,
+		entry := runtime.Entry{
+			Key: desired.Key{Kind: objectType.kind, Name: itemName}.String(),
 		}
 		switch {
 		case inDesired && inObserved:
-			entry.Changes = changes(wantItem, haveItem)
+			entry.Changes = objectType.changes(desiredObject, observedObject)
 			if len(entry.Changes) == 0 {
-				entry.Action = Noop
+				entry.Action = runtime.Noop
 			} else {
-				entry.Action = Update
+				entry.Action = runtime.Update
 			}
 		case inDesired:
-			entry.Action = Create
+			entry.Action = runtime.Create
 		default:
-			entry.Action = Delete
+			entry.Action = runtime.Delete
 		}
-		plan.add(entry)
+		plan.Add(entry)
 	}
 }
-
-func (p *Plan) add(entry Entry) {
-	p.Entries = append(p.Entries, entry)
-	switch entry.Action {
-	case Create:
-		p.Summary.Create++
-	case Update:
-		p.Summary.Update++
-	case Delete:
-		p.Summary.Delete++
-	case Noop:
-		p.Summary.Noop++
-	}
-}
-
-// External objects are referenced by a target but are not owned by it: WormCD
-// must neither create nor delete them, so they never enter a plan.
 
 func networkName(network desired.Network) string { return network.Name }
-func networkManaged(network desired.Network) bool {
-	return !network.External
+func configName(config desired.Config) string    { return config.Name }
+func secretName(secret desired.Secret) string    { return secret.Name }
+func volumeName(volume desired.Volume) string    { return volume.Name }
+func serviceName(service desired.Service) string {
+	return service.Name
 }
 
-func configName(config desired.Config) string { return config.Name }
-func configManaged(config desired.Config) bool {
-	return !config.External
-}
-
-func secretName(secret desired.Secret) string { return secret.Name }
-func secretManaged(secret desired.Secret) bool {
-	return !secret.External
-}
-
-func volumeName(volume desired.Volume) string { return volume.Name }
-func volumeManaged(volume desired.Volume) bool {
-	return !volume.External
-}
-
-func serviceName(service desired.Service) string { return service.Name }
-
-func networkChanges(want, have desired.Network) []string {
+func networkChanges(desiredNetwork, observedNetwork desired.Network) []string {
 	var out []string
-	addChange(&out, "driver", want.Driver, have.Driver)
-	addChange(&out, "driverOpts", nonEmptyMap(want.DriverOpts), nonEmptyMap(have.DriverOpts))
-	addChange(&out, "attachable", want.Attachable, have.Attachable)
-	addChange(&out, "internal", want.Internal, have.Internal)
-	addMapChanges(&out, "labels", want.Labels, have.Labels)
+	addChange(&out, "driver", desiredNetwork.Driver, observedNetwork.Driver)
+	addChange(&out, "driverOpts",
+		nonEmptyMap(desiredNetwork.DriverOpts),
+		nonEmptyMap(observedNetwork.DriverOpts),
+	)
+	addChange(&out, "attachable", desiredNetwork.Attachable, observedNetwork.Attachable)
+	addChange(&out, "internal", desiredNetwork.Internal, observedNetwork.Internal)
+	addMapChanges(&out, "labels", desiredNetwork.Labels, observedNetwork.Labels)
 	return out
 }
 
-func configChanges(want, have desired.Config) []string {
+func configChanges(desiredConfig, observedConfig desired.Config) []string {
 	var out []string
-	addMapChanges(&out, "labels", want.Labels, have.Labels)
+	addMapChanges(&out, "labels", desiredConfig.Labels, observedConfig.Labels)
 	return out
 }
 
-func secretChanges(want, have desired.Secret) []string {
+func secretChanges(desiredSecret, observedSecret desired.Secret) []string {
 	var out []string
-	addMapChanges(&out, "labels", want.Labels, have.Labels)
+	addMapChanges(&out, "labels", desiredSecret.Labels, observedSecret.Labels)
 	return out
 }
 
-func volumeChanges(want, have desired.Volume) []string {
-	want.DriverOpts = nonEmptyMap(want.DriverOpts)
-	have.DriverOpts = nonEmptyMap(have.DriverOpts)
-
+func volumeChanges(desiredVolume, observedVolume desired.Volume) []string {
 	var out []string
-	addChange(&out, "driver", want.Driver, have.Driver)
-	addChange(&out, "driverOpts", want.DriverOpts, have.DriverOpts)
-	addMapChanges(&out, "labels", want.Labels, have.Labels)
+	addChange(&out, "driver", desiredVolume.Driver, observedVolume.Driver)
+	addChange(&out, "driverOpts",
+		nonEmptyMap(desiredVolume.DriverOpts),
+		nonEmptyMap(observedVolume.DriverOpts),
+	)
+	addMapChanges(&out, "labels", desiredVolume.Labels, observedVolume.Labels)
 	return out
 }
 
-func serviceChanges(want, have desired.Service) []string {
-	want = canonicalService(want)
-	have = canonicalService(have)
+func serviceChanges(desiredService, observedService desired.Service) []string {
+	desiredService = canonicalService(desiredService)
+	observedService = canonicalService(observedService)
 
 	var out []string
-	addChange(&out, "image", want.Image, have.Image)
-	addChange(&out, "mode", want.Mode, have.Mode)
-	addChange(&out, "replicas", want.Replicas, have.Replicas)
-	addChange(&out, "endpointMode", want.EndpointMode, have.EndpointMode)
-	addChange(&out, "command", want.Command, have.Command)
-	addChange(&out, "entrypoint", want.Entrypoint, have.Entrypoint)
-	addMapChanges(&out, "env", want.Env, have.Env)
-	addMapChanges(&out, "labels", want.Labels, have.Labels)
-	addChange(&out, "hostname", want.Hostname, have.Hostname)
-	addChange(&out, "user", want.User, have.User)
-	addChange(&out, "workingDir", want.WorkingDir, have.WorkingDir)
-	addChange(&out, "stopSignal", want.StopSignal, have.StopSignal)
-	addChange(&out, "stopGracePeriod", want.StopGracePeriod, have.StopGracePeriod)
-	addChange(&out, "readOnly", want.ReadOnly, have.ReadOnly)
-	addChange(&out, "ports", want.Ports, have.Ports)
-	addChange(&out, "networks", want.Networks, have.Networks)
-	addChange(&out, "mounts", want.Mounts, have.Mounts)
-	addChange(&out, "configs", want.Configs, have.Configs)
-	addChange(&out, "secrets", want.Secrets, have.Secrets)
-	addChange(&out, "resources", want.Resources, have.Resources)
-	addChange(&out, "placement", want.Placement, have.Placement)
-	addChange(&out, "restart", want.Restart, have.Restart)
-	addChange(&out, "healthcheck", want.Healthcheck, have.Healthcheck)
-	addChange(&out, "update", want.Update, have.Update)
-	addChange(&out, "rollback", want.Rollback, have.Rollback)
+	addChange(&out, "image", desiredService.Image, observedService.Image)
+	addChange(&out, "mode", desiredService.Mode, observedService.Mode)
+	addChange(&out, "replicas", desiredService.Replicas, observedService.Replicas)
+	addChange(&out, "endpointMode", desiredService.EndpointMode, observedService.EndpointMode)
+	addChange(&out, "command", desiredService.Command, observedService.Command)
+	addChange(&out, "entrypoint", desiredService.Entrypoint, observedService.Entrypoint)
+	addMapChanges(&out, "env", desiredService.Env, observedService.Env)
+	addMapChanges(&out, "labels", desiredService.Labels, observedService.Labels)
+	addChange(&out, "hostname", desiredService.Hostname, observedService.Hostname)
+	addChange(&out, "user", desiredService.User, observedService.User)
+	addChange(&out, "workingDir", desiredService.WorkingDir, observedService.WorkingDir)
+	addChange(&out, "stopSignal", desiredService.StopSignal, observedService.StopSignal)
+	addChange(&out, "stopGracePeriod", desiredService.StopGracePeriod, observedService.StopGracePeriod)
+	addChange(&out, "readOnly", desiredService.ReadOnly, observedService.ReadOnly)
+	addChange(&out, "ports", desiredService.Ports, observedService.Ports)
+	addChange(&out, "networks", desiredService.Networks, observedService.Networks)
+	addChange(&out, "mounts", desiredService.Mounts, observedService.Mounts)
+	addChange(&out, "configs", desiredService.Configs, observedService.Configs)
+	addChange(&out, "secrets", desiredService.Secrets, observedService.Secrets)
+	addChange(&out, "resources", desiredService.Resources, observedService.Resources)
+	addChange(&out, "placement", desiredService.Placement, observedService.Placement)
+	addChange(&out, "restart", desiredService.Restart, observedService.Restart)
+	addChange(&out, "healthcheck", desiredService.Healthcheck, observedService.Healthcheck)
+	addChange(&out, "update", desiredService.Update, observedService.Update)
+	addChange(&out, "rollback", desiredService.Rollback, observedService.Rollback)
 	return out
 }
 
-func addChange[T any](out *[]string, field string, want, have T) {
-	if !reflect.DeepEqual(want, have) {
+func addChange[T any](out *[]string, field string, desiredValue, observedValue T) {
+	if !reflect.DeepEqual(desiredValue, observedValue) {
 		*out = append(*out, field)
 	}
 }
 
-func addMapChanges(out *[]string, field string, want, have map[string]string) {
-	keys := make(map[string]struct{}, len(want)+len(have))
-	for key := range want {
+func addMapChanges(out *[]string, field string, desiredValues, observedValues map[string]string) {
+	keys := make(map[string]struct{}, len(desiredValues)+len(observedValues))
+	for key := range desiredValues {
 		keys[key] = struct{}{}
 	}
-	for key := range have {
+	for key := range observedValues {
 		keys[key] = struct{}{}
 	}
 
@@ -259,7 +216,7 @@ func addMapChanges(out *[]string, field string, want, have map[string]string) {
 	sort.Strings(names)
 
 	for _, key := range names {
-		if want[key] != have[key] {
+		if desiredValues[key] != observedValues[key] {
 			*out = append(*out, field+"."+key)
 		}
 	}

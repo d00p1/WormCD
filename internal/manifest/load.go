@@ -30,40 +30,48 @@ type Options struct {
 // Load reads a wormcd.yaml, loads its Compose file with the target overlay and
 // returns the normalized desired state.
 func Load(ctx context.Context, opts Options) (*desired.Desired, error) {
+	state, _, err := LoadWithCluster(ctx, opts)
+	return state, err
+}
+
+// LoadWithCluster is Load plus the cluster name declared by the selected
+// target. The name is not part of the desired state: cluster registration is a
+// control-plane concern, not a runtime object.
+func LoadWithCluster(ctx context.Context, opts Options) (*desired.Desired, string, error) {
 	file, target, err := resolveOptions(opts)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	abs, err := filepath.Abs(file)
 	if err != nil {
-		return nil, fmt.Errorf("resolve manifest path: %w", err)
+		return nil, "", fmt.Errorf("resolve manifest path: %w", err)
 	}
 
 	app, err := loadApplication(abs)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if err := app.validate(); err != nil {
-		return nil, fmt.Errorf("%s: %w", abs, err)
+		return nil, "", fmt.Errorf("%s: %w", abs, err)
 	}
 
 	selected, err := app.selectTarget(target)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", abs, err)
+		return nil, "", fmt.Errorf("%s: %w", abs, err)
 	}
 
 	baseDir := filepath.Dir(abs)
 	composePath, err := resolveLocal(baseDir, app.Spec.Compose)
 	if err != nil {
-		return nil, fmt.Errorf("%s: spec.compose: %w", abs, err)
+		return nil, "", fmt.Errorf("%s: spec.compose: %w", abs, err)
 	}
 
 	configs := []string{composePath}
 	if selected.Overlay != "" {
 		overlayPath, err := resolveLocal(baseDir, selected.Overlay)
 		if err != nil {
-			return nil, fmt.Errorf("%s: target %q overlay: %w", abs, selected.Name, err)
+			return nil, "", fmt.Errorf("%s: target %q overlay: %w", abs, selected.Name, err)
 		}
 		configs = append(configs, overlayPath)
 	}
@@ -72,7 +80,7 @@ func Load(ctx context.Context, opts Options) (*desired.Desired, error) {
 
 	for _, path := range configs {
 		if err := rejectOverrideTags(path); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 	}
 
@@ -84,22 +92,22 @@ func Load(ctx context.Context, opts Options) (*desired.Desired, error) {
 		cli.WithDotEnv,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", abs, err)
+		return nil, "", fmt.Errorf("%s: %w", abs, err)
 	}
 
 	project, err := projectOptions.LoadProject(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", abs, err)
+		return nil, "", fmt.Errorf("%s: %w", abs, err)
 	}
 
 	state, err := normalize(project, app.Metadata.Name, selected, namespace, baseDir)
 	if err != nil {
 		if len(project.ComposeFiles) > 0 {
-			return nil, fmt.Errorf("%s: %w", strings.Join(project.ComposeFiles, ", "), err)
+			return nil, "", fmt.Errorf("%s: %w", strings.Join(project.ComposeFiles, ", "), err)
 		}
-		return nil, err
+		return nil, "", err
 	}
-	return state, nil
+	return state, selected.Cluster, nil
 }
 
 func resolveOptions(opts Options) (file, target string, err error) {

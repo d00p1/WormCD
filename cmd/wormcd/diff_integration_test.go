@@ -13,9 +13,11 @@ import (
 
 	"github.com/d00p1/wormcd/internal/cluster"
 	"github.com/d00p1/wormcd/internal/desired"
-	"github.com/d00p1/wormcd/internal/reconcile"
+	"github.com/d00p1/wormcd/internal/manifest"
 	"github.com/d00p1/wormcd/internal/runtime"
 	"github.com/d00p1/wormcd/internal/runtime/swarm"
+	"github.com/moby/moby/api/types/mount"
+	"github.com/moby/moby/api/types/network"
 	swarmtypes "github.com/moby/moby/api/types/swarm"
 	"github.com/moby/moby/client"
 )
@@ -53,40 +55,22 @@ func TestIntegrationDiff(t *testing.T) {
 
 	app := fmt.Sprintf("it%x", time.Now().UnixNano())
 	target := "prod"
-	namespace := desired.TargetNamespace(app, target)
-	labels := desired.Labels(app, target)
-	scope := runtime.Scope{Application: app, Target: target}
+	root := writeDiffStand(t, app, target)
 
-	root := t.TempDir()
-	appDir := filepath.Join(root, "apps", "web")
-	if err := os.MkdirAll(appDir, 0o755); err != nil {
-		t.Fatalf("create app dir: %v", err)
-	}
-	compose, err := os.ReadFile(filepath.Join("testdata", "stand", "compose.yaml"))
+	state, err := manifest.Load(ctx, manifest.Options{App: app + "/" + target, Root: root})
 	if err != nil {
-		t.Fatalf("read fixture compose: %v", err)
+		t.Fatalf("load stand: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(appDir, "compose.yaml"), compose, 0o644); err != nil {
-		t.Fatalf("write compose: %v", err)
-	}
-	manifest := fmt.Sprintf(`apiVersion: wormcd.dev/v1alpha1
-kind: Application
-metadata:
-  name: %s
-spec:
-  compose: compose.yaml
-  targets:
-    - name: %s
-      cluster: local
-`, app, target)
-	if err := os.WriteFile(filepath.Join(appDir, "wormcd.yaml"), []byte(manifest), 0o644); err != nil {
-		t.Fatalf("write manifest: %v", err)
-	}
+	scope := runtime.Scope{Application: state.Application, Target: state.Target}
 
-	networkName := namespace + "_default"
-	createdNetwork, err := api.NetworkCreate(ctx, networkName, client.NetworkCreateOptions{
-		Driver: "overlay",
-		Labels: labels,
+	// Create the objects a real apply would create, so the stand covers
+	// networks, configs, external secrets, volumes and published ports.
+	networkSpec := state.Networks[0]
+	createdNetwork, err := api.NetworkCreate(ctx, networkSpec.Name, client.NetworkCreateOptions{
+		Driver:     networkSpec.Driver,
+		Labels:     networkSpec.Labels,
+		Attachable: networkSpec.Attachable,
+		Internal:   networkSpec.Internal,
 	})
 	if err != nil {
 		t.Fatalf("create network: %v", err)
@@ -96,17 +80,65 @@ spec:
 		return err
 	})
 
-	image := "ghcr.io/d00p1/wormcd-demo:v1"
-	webName := namespace + "_web"
-	web := createDiffService(t, ctx, api, webName, image, createdNetwork.ID, labels)
+	configSpec := state.Configs[0]
+	createdConfig, err := api.ConfigCreate(ctx, client.ConfigCreateOptions{
+		Spec: swarmtypes.ConfigSpec{
+			Annotations: swarmtypes.Annotations{Name: configSpec.Name, Labels: configSpec.Labels},
+			Data:        configSpec.Data,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create config: %v", err)
+	}
+	cleanupDiff(t, "config", func(ctx context.Context) error {
+		_, err := api.ConfigRemove(ctx, createdConfig.ID, client.ConfigRemoveOptions{})
+		return err
+	})
+
+	// Secrets are external in v0: the object exists in the cluster but carries
+	// no WormCD labels, so Inspect must not plan it.
+	secretSpec := state.Secrets[0]
+	createdSecret, err := api.SecretCreate(ctx, client.SecretCreateOptions{
+		Spec: swarmtypes.SecretSpec{
+			Annotations: swarmtypes.Annotations{Name: secretSpec.Name},
+			Data:        []byte("stand-secret"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create secret: %v", err)
+	}
+	cleanupDiff(t, "secret", func(ctx context.Context) error {
+		_, err := api.SecretRemove(ctx, createdSecret.ID, client.SecretRemoveOptions{})
+		return err
+	})
+
+	volumeSpec := state.Volumes[0]
+	if _, err := api.VolumeCreate(ctx, client.VolumeCreateOptions{
+		Name:       volumeSpec.Name,
+		Driver:     volumeSpec.Driver,
+		DriverOpts: volumeSpec.DriverOpts,
+		Labels:     volumeSpec.Labels,
+	}); err != nil {
+		t.Fatalf("create volume: %v", err)
+	}
+	cleanupDiff(t, "volume", func(ctx context.Context) error {
+		_, err := api.VolumeRemove(ctx, volumeSpec.Name, client.VolumeRemoveOptions{Force: true})
+		return err
+	})
+
+	webSpec := state.Services[0]
+	web := createDiffService(t, ctx, api, webSpec, createdNetwork.ID, createdConfig.ID, createdSecret.ID)
 	cleanupDiff(t, "service", func(ctx context.Context) error {
 		_, err := api.ServiceRemove(ctx, web.ID, client.ServiceRemoveOptions{})
 		return err
 	})
 	waitForServiceSettled(t, ctx, api, web.ID)
 
-	oldName := namespace + "_old"
-	old := createDiffService(t, ctx, api, oldName, image, createdNetwork.ID, labels)
+	oldSpec := webSpec
+	oldSpec.Name = state.Namespace + "_old"
+	oldSpec.Ports = nil
+	oldSpec.EndpointMode = ""
+	old := createDiffService(t, ctx, api, oldSpec, createdNetwork.ID, createdConfig.ID, createdSecret.ID)
 	oldRemoved := false
 	cleanupDiff(t, "service", func(ctx context.Context) error {
 		if oldRemoved {
@@ -117,15 +149,17 @@ spec:
 	})
 	waitForServiceSettled(t, ctx, api, old.ID)
 
-	args := diffArgs(cfg, app, target, root)
+	inspector := swarm.New(api)
 
 	// A matching service is Noop; the extra service is Delete.
 	before := diffSnapshot(t, ctx, api, scope)
-	plan, err := diffPlan(t, args)
+	plan, err := diffPlan(t, inspector, app, target, root)
 	requireExitCode(t, err, 2)
-	requireAction(t, plan, "Network/"+networkName, reconcile.Noop)
-	requireAction(t, plan, "Service/"+webName, reconcile.Noop)
-	requireAction(t, plan, "Service/"+oldName, reconcile.Delete)
+	requireAction(t, plan, "Network/"+networkSpec.Name, runtime.Noop)
+	requireAction(t, plan, "Config/"+configSpec.Name, runtime.Noop)
+	requireAction(t, plan, "Volume/"+volumeSpec.Name, runtime.Noop)
+	requireAction(t, plan, "Service/"+webSpec.Name, runtime.Noop)
+	requireAction(t, plan, "Service/"+oldSpec.Name, runtime.Delete)
 	if after := diffSnapshot(t, ctx, api, scope); after != before {
 		t.Fatalf("diff mutated the cluster\n--- before ---\n%s\n--- after ---\n%s", before, after)
 	}
@@ -133,9 +167,9 @@ spec:
 	// A manual image change must show up as Update with the changed field.
 	setDiffServiceImage(t, ctx, api, web.ID, "ghcr.io/d00p1/wormcd-demo:manual")
 	before = diffSnapshot(t, ctx, api, scope)
-	plan, err = diffPlan(t, args)
+	plan, err = diffPlan(t, inspector, app, target, root)
 	requireExitCode(t, err, 2)
-	webEntry := requireAction(t, plan, "Service/"+webName, reconcile.Update)
+	webEntry := requireAction(t, plan, "Service/"+webSpec.Name, runtime.Update)
 	if len(webEntry.Changes) != 1 || webEntry.Changes[0] != "image" {
 		t.Fatalf("web changes = %v, want [image]", webEntry.Changes)
 	}
@@ -148,16 +182,16 @@ spec:
 		t.Fatalf("remove old service: %v", err)
 	}
 	oldRemoved = true
-	setDiffServiceImage(t, ctx, api, web.ID, image)
+	setDiffServiceImage(t, ctx, api, web.ID, webSpec.Image)
 
 	before = diffSnapshot(t, ctx, api, scope)
-	plan, err = diffPlan(t, args)
+	plan, err = diffPlan(t, inspector, app, target, root)
 	requireExitCode(t, err, 0)
 	if plan.HasChanges() {
 		t.Fatalf("plan after cleanup has changes: %+v", plan.Entries)
 	}
 	for _, entry := range plan.Entries {
-		if entry.Action != reconcile.Noop {
+		if entry.Action != runtime.Noop {
 			t.Fatalf("%s: action = %s, want Noop", entry.Key, entry.Action)
 		}
 	}
@@ -166,33 +200,115 @@ spec:
 	}
 }
 
+func writeDiffStand(t *testing.T, app, target string) string {
+	t.Helper()
+
+	root := t.TempDir()
+	appDir := filepath.Join(root, "apps", "web")
+	if err := os.MkdirAll(appDir, 0o755); err != nil {
+		t.Fatalf("create app dir: %v", err)
+	}
+
+	compose, err := os.ReadFile(filepath.Join("testdata", "stand", "compose.yaml"))
+	if err != nil {
+		t.Fatalf("read fixture compose: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(appDir, "compose.yaml"), compose, 0o644); err != nil {
+		t.Fatalf("write compose: %v", err)
+	}
+
+	application := fmt.Sprintf(`apiVersion: wormcd.dev/v1alpha1
+kind: Application
+metadata:
+  name: %s
+spec:
+  compose: compose.yaml
+  targets:
+    - name: %s
+      cluster: local
+`, app, target)
+	if err := os.WriteFile(filepath.Join(appDir, "wormcd.yaml"), []byte(application), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	return root
+}
+
 func createDiffService(
 	t *testing.T,
 	ctx context.Context,
 	api *client.Client,
-	name, image, networkID string,
-	labels map[string]string,
+	service desired.Service,
+	networkID, configID, secretID string,
 ) swarmtypes.Service {
 	t.Helper()
 
-	zero := uint64(0)
-	created, err := api.ServiceCreate(ctx, client.ServiceCreateOptions{
-		Spec: swarmtypes.ServiceSpec{
-			Annotations: swarmtypes.Annotations{Name: name, Labels: labels},
-			TaskTemplate: swarmtypes.TaskSpec{
-				ContainerSpec: &swarmtypes.ContainerSpec{Image: image},
-				Networks:      []swarmtypes.NetworkAttachmentConfig{{Target: networkID}},
+	container := &swarmtypes.ContainerSpec{Image: service.Image}
+	for _, ref := range service.Configs {
+		container.Configs = append(container.Configs, &swarmtypes.ConfigReference{
+			ConfigID:   configID,
+			ConfigName: ref.Source,
+			File: &swarmtypes.ConfigReferenceFileTarget{
+				Name: ref.Target,
+				UID:  ref.UID,
+				GID:  ref.GID,
+				Mode: os.FileMode(ref.Mode),
 			},
-			Mode: swarmtypes.ServiceMode{Replicated: &swarmtypes.ReplicatedService{Replicas: &zero}},
+		})
+	}
+	for _, ref := range service.Secrets {
+		container.Secrets = append(container.Secrets, &swarmtypes.SecretReference{
+			SecretID:   secretID,
+			SecretName: ref.Source,
+			File: &swarmtypes.SecretReferenceFileTarget{
+				Name: ref.Target,
+				UID:  ref.UID,
+				GID:  ref.GID,
+				Mode: os.FileMode(ref.Mode),
+			},
+		})
+	}
+	for _, ref := range service.Mounts {
+		container.Mounts = append(container.Mounts, mount.Mount{
+			Type:     mount.TypeVolume,
+			Source:   ref.Source,
+			Target:   ref.Target,
+			ReadOnly: ref.ReadOnly,
+		})
+	}
+
+	replicas := service.Replicas
+	spec := swarmtypes.ServiceSpec{
+		Annotations: swarmtypes.Annotations{Name: service.Name, Labels: service.Labels},
+		TaskTemplate: swarmtypes.TaskSpec{
+			ContainerSpec: container,
+			Networks:      []swarmtypes.NetworkAttachmentConfig{{Target: networkID}},
 		},
-	})
+		Mode: swarmtypes.ServiceMode{
+			Replicated: &swarmtypes.ReplicatedService{Replicas: &replicas},
+		},
+	}
+	if service.EndpointMode != "" || len(service.Ports) > 0 {
+		endpoint := &swarmtypes.EndpointSpec{Mode: swarmtypes.ResolutionMode(service.EndpointMode)}
+		for _, port := range service.Ports {
+			endpoint.Ports = append(endpoint.Ports, swarmtypes.PortConfig{
+				Name:          port.Name,
+				TargetPort:    port.Target,
+				PublishedPort: port.Published,
+				Protocol:      network.IPProtocol(port.Protocol),
+				PublishMode:   swarmtypes.PortConfigPublishMode(port.Mode),
+			})
+		}
+		spec.EndpointSpec = endpoint
+	}
+
+	created, err := api.ServiceCreate(ctx, client.ServiceCreateOptions{Spec: spec})
 	if err != nil {
-		t.Fatalf("create service %s: %v", name, err)
+		t.Fatalf("create service %s: %v", service.Name, err)
 	}
 
 	inspected, err := api.ServiceInspect(ctx, created.ID, client.ServiceInspectOptions{})
 	if err != nil {
-		t.Fatalf("inspect service %s: %v", name, err)
+		t.Fatalf("inspect service %s: %v", service.Name, err)
 	}
 	return inspected.Service
 }
@@ -251,35 +367,25 @@ func setDiffServiceImage(t *testing.T, ctx context.Context, api *client.Client, 
 	}
 }
 
-func diffArgs(cfg cluster.Config, app, target, root string) []string {
-	args := []string{
-		"--app", app + "/" + target,
-		"--root", root,
-		"--output", "json",
-		"--endpoint", cfg.Endpoint,
-	}
-	if cfg.CAFile != "" {
-		args = append(args, "--ca", cfg.CAFile)
-	}
-	if cfg.CertFile != "" {
-		args = append(args, "--cert", cfg.CertFile)
-	}
-	if cfg.KeyFile != "" {
-		args = append(args, "--key", cfg.KeyFile)
-	}
-	return args
-}
-
-func diffPlan(t *testing.T, args []string) (reconcile.Plan, error) {
+func diffPlan(t *testing.T, inspector diffInspector, app, target, root string) (runtime.Plan, error) {
 	t.Helper()
 
 	var out bytes.Buffer
-	err := runDiffTo(args, &out)
+	err := runDiffWith(
+		[]string{"--app", app + "/" + target, "--root", root, "--output", "json"},
+		&out,
+		func(cfg cluster.Config) (diffInspector, func(), error) {
+			if cfg.Name != "local" {
+				t.Errorf("cluster name = %q, want local", cfg.Name)
+			}
+			return inspector, func() {}, nil
+		},
+	)
 	if out.Len() == 0 {
-		return reconcile.Plan{}, err
+		return runtime.Plan{}, err
 	}
 
-	var plan reconcile.Plan
+	var plan runtime.Plan
 	if decodeErr := json.Unmarshal(out.Bytes(), &plan); decodeErr != nil {
 		t.Fatalf("decode plan: %v\noutput:\n%s", decodeErr, out.String())
 	}
@@ -302,7 +408,7 @@ func requireExitCode(t *testing.T, err error, code int) {
 	}
 }
 
-func requireAction(t *testing.T, plan reconcile.Plan, key string, action reconcile.Action) reconcile.Entry {
+func requireAction(t *testing.T, plan runtime.Plan, key string, action runtime.Action) runtime.Entry {
 	t.Helper()
 
 	for _, entry := range plan.Entries {
@@ -314,7 +420,7 @@ func requireAction(t *testing.T, plan reconcile.Plan, key string, action reconci
 		}
 	}
 	t.Fatalf("%s: not found in plan %+v", key, plan.Entries)
-	return reconcile.Entry{}
+	return runtime.Entry{}
 }
 
 func diffSnapshot(t *testing.T, ctx context.Context, api *client.Client, scope runtime.Scope) string {
@@ -329,10 +435,13 @@ func diffSnapshot(t *testing.T, ctx context.Context, api *client.Client, scope r
 	if err != nil {
 		t.Fatalf("list services: %v", err)
 	}
-	versions := make(map[string]uint64)
+	scoped := make(map[string]struct{}, len(observed.Services))
+	for _, service := range observed.Services {
+		scoped[service.Name] = struct{}{}
+	}
+	versions := make(map[string]uint64, len(scoped))
 	for _, service := range services.Items {
-		if service.Spec.Labels[desired.LabelApplication] != scope.Application ||
-			service.Spec.Labels[desired.LabelTarget] != scope.Target {
+		if _, ok := scoped[service.Spec.Name]; !ok {
 			continue
 		}
 		versions[service.Spec.Name] = service.Version.Index
@@ -357,7 +466,7 @@ func diffIntegrationConfig() cluster.Config {
 		endpoint = "unix:///var/run/docker.sock"
 	}
 	return cluster.Config{
-		Name:     "integration",
+		Name:     "local",
 		Endpoint: endpoint,
 		CAFile:   os.Getenv("WORMCD_DOCKER_CA"),
 		CertFile: os.Getenv("WORMCD_DOCKER_CERT"),

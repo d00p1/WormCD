@@ -49,11 +49,9 @@ Plan a target against a Swarm cluster (read-only):
 ./bin/wormcd diff --app web/prod --root /path/to/deploy-repo --output json
 ```
 
-`diff` connects to `unix:///var/run/docker.sock` by default. Use `--endpoint`
-(or `WORMCD_DOCKER_ENDPOINT`) and `--ca`/`--cert`/`--key` (or
-`WORMCD_DOCKER_CA`/`WORMCD_DOCKER_CERT`/`WORMCD_DOCKER_KEY`) for a remote
-manager over mTLS. Exit codes: `0` — no differences, `2` — the plan has
-changes, `1` — error.
+`diff` is read-only and, until the cluster registry arrives in M2, connects to
+the local Docker socket (`unix:///var/run/docker.sock`). Exit codes: `0` — no
+differences, `2` — the plan has changes, `1` — error.
 
 Unit tests are hermetic. Docker integration tests are opt-in:
 

@@ -215,24 +215,6 @@ func TestLoadRejectsUnsupportedField(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsSwarmManagedNetworkOption(t *testing.T) {
-	path := writeApp(t, "", map[string]string{
-		"compose.yaml": `services:
-  web:
-    image: ghcr.io/d00p1/web:v1
-    networks: [backend]
-networks:
-  backend:
-    driver_opts:
-      com.docker.network.driver.overlay.vxlanid_list: "4098"
-`,
-	})
-	_, err := Load(context.Background(), Options{File: path})
-	if err == nil || !strings.Contains(err.Error(), "assigned by Swarm") {
-		t.Fatalf("error = %v, want a driver-option rejection", err)
-	}
-}
-
 func TestLoadRejectsUntaggedImage(t *testing.T) {
 	path := writeApp(t, "", map[string]string{
 		"compose.yaml": `services:
@@ -320,6 +302,22 @@ func TestLoadByApp(t *testing.T) {
 	}
 	if state.Application != "web" || state.Target != "prod" {
 		t.Fatalf("application/target = %s/%s, want web/prod", state.Application, state.Target)
+	}
+}
+
+func TestLoadWithCluster(t *testing.T) {
+	state, clusterName, err := LoadWithCluster(context.Background(), Options{
+		App:  "web/prod",
+		Root: filepath.Join("testdata"),
+	})
+	if err != nil {
+		t.Fatalf("LoadWithCluster: %v", err)
+	}
+	if state.Application != "web" || state.Target != "prod" {
+		t.Fatalf("application/target = %s/%s, want web/prod", state.Application, state.Target)
+	}
+	if clusterName != "prod-1" {
+		t.Fatalf("cluster = %q, want prod-1", clusterName)
 	}
 }
 
