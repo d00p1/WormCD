@@ -104,7 +104,10 @@ type MountType string
 const (
 	MountVolume MountType = "volume"
 	MountBind   MountType = "bind"
-	MountTmpfs  MountType = "tmpfs"
+	// MountTmpfs is only produced by runtime inspection: the renderer rejects
+	// tmpfs mounts in v0, but an out-of-band tmpfs mount must still be visible
+	// as drift.
+	MountTmpfs MountType = "tmpfs"
 )
 
 // Mount is a service volume mount.
