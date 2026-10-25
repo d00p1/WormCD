@@ -22,3 +22,13 @@ Issues and specs for this repo live in GitHub Issues, managed with the `gh` CLI.
 ### Domain docs
 
 Single-context: one `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+### Session logs
+
+Retrospectives read OpenCode's local SQLite store; see
+`.agents/skills/retro/reference/session-logs.md` for the schema and queries.
+
+### Manifests
+
+Author `wormcd.yaml` + Compose + overlays with the `wormcd-manifest` skill.
+Working example: `examples/deploy-repo/`; model: `docs/design/0001-v0-architecture.md` §4.

@@ -1,0 +1,6 @@
+# Staging is the smaller copy: the base compose is environment-neutral and
+# this overlay only changes what differs.
+services:
+  web:
+    deploy:
+      replicas: 2

@@ -17,6 +17,22 @@ Early development. Compose/overlay rendering (`wormcd render`), read-only
 Swarm inspection and read-only planning (`wormcd diff`) are implemented;
 reconciliation (apply) is next.
 
+| Capability | Status |
+|---|---|
+| Write `wormcd.yaml` + Compose + overlay, render `Desired` | `wormcd render` |
+| Inspect a Swarm cluster read-only | `Runtime.Inspect` (internal) |
+| Plan `Desired` vs `Observed` (`Create`/`Update`/`Delete`/`Noop`) | `wormcd diff`, exit `2` on drift |
+| Apply, prune, self-heal | not yet (M1) |
+| Fetch Git sources, multi-cluster targets | not yet (M2) |
+| Webhooks, `syncPolicy`, rollback | not yet (M3) |
+| Registry polling for new image versions | not planned: CI builds the image and commits the digest to the deploy repository |
+
+To try it now, write the manifests in a local checkout, create the labelled
+objects described in [cmd/wormcd/testdata/stand/README.md](cmd/wormcd/testdata/stand/README.md),
+and run `wormcd diff`. A complete, renderable deploy repo lives in
+[examples/deploy-repo](examples/deploy-repo/). WormCD does not deploy yet — use
+`docker stack deploy` for the workload.
+
 ## Development
 
 Requires Go 1.27+ and [mise](https://mise.jdx.dev/). The toolchain and every
