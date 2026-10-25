@@ -21,7 +21,13 @@ func TestIntegrationPing(t *testing.T) {
 		endpoint = "unix:///var/run/docker.sock"
 	}
 
-	cli, err := New(Config{Name: "integration", Endpoint: endpoint})
+	cli, err := New(Config{
+		Name:     "integration",
+		Endpoint: endpoint,
+		CAFile:   os.Getenv("WORMCD_DOCKER_CA"),
+		CertFile: os.Getenv("WORMCD_DOCKER_CERT"),
+		KeyFile:  os.Getenv("WORMCD_DOCKER_KEY"),
+	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
