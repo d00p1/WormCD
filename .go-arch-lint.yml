@@ -1,0 +1,60 @@
+version: 3
+workdir: .
+
+# External packages are not restricted yet; these rules enforce the package
+# boundaries described in docs/design/0001-v0-architecture.md.
+allow:
+  depOnAnyVendor: true
+
+components:
+  cmd: { in: cmd/** }
+  api: { in: internal/api }
+  cluster: { in: internal/cluster }
+  desired: { in: internal/desired }
+  git: { in: internal/git }
+  manifest: { in: internal/manifest }
+  reconcile: { in: internal/reconcile }
+  runtime: { in: internal/runtime }
+  swarm: { in: internal/runtime/swarm }
+  store: { in: internal/store }
+  version: { in: internal/version }
+
+deps:
+  # Composition root: wires every component together.
+  cmd:
+    anyProjectDeps: true
+
+  # HTTP API may coordinate reconciliation, persistence and source fetching.
+  api:
+    mayDependOn: [reconcile, store, git]
+
+  cluster:
+    anyVendorDeps: true
+
+  # The normalized desired-state model is the core: it depends on nothing.
+  desired:
+    anyVendorDeps: true
+
+  git:
+    anyVendorDeps: true
+
+  # Compose rendering produces the desired-state model.
+  manifest:
+    mayDependOn: [desired]
+
+  reconcile:
+    mayDependOn: [desired, manifest, runtime, store, git]
+
+  # The runtime interface only knows the normalized model.
+  runtime:
+    mayDependOn: [desired]
+
+  # Swarm-specific code stays behind the runtime interface.
+  swarm:
+    mayDependOn: [runtime, desired, cluster]
+
+  store:
+    anyVendorDeps: true
+
+  version:
+    anyVendorDeps: true
