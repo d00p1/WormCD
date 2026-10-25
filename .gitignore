@@ -31,6 +31,9 @@ go.work.sum
 # Local build output
 /bin/
 
+# Local hk overrides
+hk.local.pkl
+
 # Editor/IDE
 # .idea/
 # .vscode/
