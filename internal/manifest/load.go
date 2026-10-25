@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/compose-spec/compose-go/v2/cli"
 	"github.com/d00p1/wormcd/internal/desired"
+	"go.yaml.in/yaml/v4"
 )
 
 // Options selects the application manifest and target to render.
@@ -66,7 +68,13 @@ func Load(ctx context.Context, opts Options) (*desired.Desired, error) {
 		configs = append(configs, overlayPath)
 	}
 
-	namespace := desired.Namespace(app.Metadata.Name, selected.Name)
+	namespace := desired.TargetNamespace(app.Metadata.Name, selected.Name)
+
+	for _, path := range configs {
+		if err := rejectOverrideTags(path); err != nil {
+			return nil, err
+		}
+	}
 
 	projectOptions, err := cli.NewProjectOptions(
 		configs,
@@ -85,10 +93,13 @@ func Load(ctx context.Context, opts Options) (*desired.Desired, error) {
 	}
 
 	state, err := normalize(project, app.Metadata.Name, selected, namespace, baseDir)
-	if err != nil && len(project.ComposeFiles) > 0 {
-		return nil, fmt.Errorf("%s: %w", strings.Join(project.ComposeFiles, ", "), err)
+	if err != nil {
+		if len(project.ComposeFiles) > 0 {
+			return nil, fmt.Errorf("%s: %w", strings.Join(project.ComposeFiles, ", "), err)
+		}
+		return nil, err
 	}
-	return state, err
+	return state, nil
 }
 
 func resolveOptions(opts Options) (file, target string, err error) {
@@ -121,6 +132,7 @@ func resolveOptions(opts Options) (file, target string, err error) {
 
 func findApplication(root, name string) (string, error) {
 	var found []string
+	var invalid []string
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -136,7 +148,8 @@ func findApplication(root, name string) (string, error) {
 		}
 		app, err := loadApplication(path)
 		if err != nil {
-			return err
+			invalid = append(invalid, err.Error())
+			return nil
 		}
 		if app.Metadata.Name == name {
 			found = append(found, path)
@@ -148,12 +161,39 @@ func findApplication(root, name string) (string, error) {
 	}
 	switch len(found) {
 	case 0:
+		if len(invalid) > 0 {
+			return "", fmt.Errorf("application %q not found under %s (invalid manifests: %s)", name, root, strings.Join(invalid, "; "))
+		}
 		return "", fmt.Errorf("application %q not found under %s", name, root)
 	case 1:
 		return found[0], nil
 	default:
 		return "", fmt.Errorf("application %q is ambiguous: %s", name, strings.Join(found, ", "))
 	}
+}
+
+func rejectOverrideTags(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	return walkTags(&document, path)
+}
+
+func walkTags(node *yaml.Node, path string) error {
+	if node.Tag == "!reset" || node.Tag == "!override" {
+		return fmt.Errorf("%s:%d:%d: %s tags are not supported; use merge-only overlays", path, node.Line, node.Column, node.Tag)
+	}
+	for _, child := range node.Content {
+		if err := walkTags(child, path); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func resolveLocal(baseDir, path string) (string, error) {

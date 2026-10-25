@@ -90,10 +90,7 @@ func (n *normalizer) network(key string, cfg types.NetworkConfig) (desired.Netwo
 			len(cfg.Labels) > 0 || !zeroIPAM(cfg.Ipam) || cfg.EnableIPv4 != nil || cfg.EnableIPv6 != nil {
 			return desired.Network{}, fmt.Errorf("network %q: external networks only support name", key)
 		}
-		name := cfg.Name
-		if name == "" {
-			name = key
-		}
+		name := firstNonEmpty(cfg.Name, key)
 		return desired.Network{Name: name, External: true}, nil
 	}
 
@@ -108,10 +105,7 @@ func (n *normalizer) network(key string, cfg types.NetworkConfig) (desired.Netwo
 	if driver == "" {
 		driver = "overlay"
 	}
-	name := cfg.Name
-	if name == "" {
-		name = n.namespace + "_" + key
-	}
+	name := firstNonEmpty(cfg.Name, n.namespace+"_"+key)
 	return desired.Network{
 		Name:       name,
 		Driver:     driver,
@@ -156,14 +150,10 @@ func (n *normalizer) config(key string, cfg types.ConfigObjConfig) (desired.Conf
 	}
 
 	if bool(cfg.External) {
-		if cfg.File != "" || cfg.Environment != "" || cfg.Content != "" {
-			return desired.Config{}, fmt.Errorf("config %q: external configs cannot have file, content or environment", key)
+		if cfg.File != "" || cfg.Environment != "" || cfg.Content != "" || len(cfg.Labels) > 0 {
+			return desired.Config{}, fmt.Errorf("config %q: external configs only support name", key)
 		}
-		name := cfg.Name
-		if name == "" {
-			name = key
-		}
-		return desired.Config{Name: name, Source: key, External: true, Labels: cfg.Labels}, nil
+		return desired.Config{Name: firstNonEmpty(cfg.Name, key), Source: key, External: true}, nil
 	}
 
 	if cfg.Environment != "" {
@@ -198,10 +188,7 @@ func (n *normalizer) config(key string, cfg types.ConfigObjConfig) (desired.Conf
 	sum := sha256.Sum256(data)
 	hash := hex.EncodeToString(sum[:])[:12]
 
-	base := cfg.Name
-	if base == "" {
-		base = n.namespace + "_" + key
-	}
+	base := firstNonEmpty(cfg.Name, n.namespace+"_"+key)
 	return desired.Config{
 		Name:   base + "_" + hash,
 		Source: key,
@@ -231,14 +218,10 @@ func (n *normalizer) secret(key string, cfg types.SecretConfig) (desired.Secret,
 	if !bool(cfg.External) {
 		return desired.Secret{}, fmt.Errorf("secret %q: v0 supports external Docker secrets only", key)
 	}
-	if cfg.File != "" || cfg.Environment != "" || cfg.Content != "" {
-		return desired.Secret{}, fmt.Errorf("secret %q: external secrets cannot have file, content or environment", key)
+	if cfg.File != "" || cfg.Environment != "" || cfg.Content != "" || len(cfg.Labels) > 0 {
+		return desired.Secret{}, fmt.Errorf("secret %q: external secrets only support name", key)
 	}
-	name := cfg.Name
-	if name == "" {
-		name = key
-	}
-	return desired.Secret{Name: name, Source: key, External: true, Labels: cfg.Labels}, nil
+	return desired.Secret{Name: firstNonEmpty(cfg.Name, key), Source: key, External: true}, nil
 }
 
 func (n *normalizer) volumes(project *types.Project) error {
@@ -258,20 +241,14 @@ func (n *normalizer) volume(key string, cfg types.VolumeConfig) (desired.Volume,
 		if cfg.Driver != "" || len(cfg.DriverOpts) > 0 || len(cfg.Labels) > 0 {
 			return desired.Volume{}, fmt.Errorf("volume %q: external volumes only support name", key)
 		}
-		name := cfg.Name
-		if name == "" {
-			name = key
-		}
+		name := firstNonEmpty(cfg.Name, key)
 		return desired.Volume{Name: name, External: true}, nil
 	}
 	driver := cfg.Driver
 	if driver == "" {
 		driver = "local"
 	}
-	name := cfg.Name
-	if name == "" {
-		name = n.namespace + "_" + key
-	}
+	name := firstNonEmpty(cfg.Name, n.namespace+"_"+key)
 	return desired.Volume{
 		Name:       name,
 		Driver:     driver,
@@ -293,7 +270,7 @@ func (n *normalizer) services(project *types.Project) error {
 
 func (n *normalizer) service(key string, s types.ServiceConfig) (desired.Service, error) {
 	if fields := unsupportedServiceFields(s); len(fields) > 0 {
-		return desired.Service{}, fmt.Errorf("service %q: unsupported fields: %s", key, strings.Join(fields, ", "))
+		return desired.Service{}, fmt.Errorf("services.%s: unsupported fields: %s", key, strings.Join(fields, ", "))
 	}
 	if s.Image == "" {
 		return desired.Service{}, fmt.Errorf("service %q: image is required", key)
@@ -308,6 +285,10 @@ func (n *normalizer) service(key string, s types.ServiceConfig) (desired.Service
 	}
 	if deploy.EndpointMode != "" && deploy.EndpointMode != "vip" && deploy.EndpointMode != "dnsrr" {
 		return desired.Service{}, fmt.Errorf("service %q: deploy.endpoint_mode %q is not supported", key, deploy.EndpointMode)
+	}
+	endpointMode := deploy.EndpointMode
+	if endpointMode == "" {
+		endpointMode = "vip"
 	}
 
 	mode, replicas, err := serviceMode(key, s, deploy)
@@ -372,6 +353,7 @@ func (n *normalizer) service(key string, s types.ServiceConfig) (desired.Service
 		Image:           s.Image,
 		Mode:            mode,
 		Replicas:        replicas,
+		EndpointMode:    endpointMode,
 		Command:         commandPtr(s.Command),
 		Entrypoint:      commandPtr(s.Entrypoint),
 		Env:             env,
@@ -823,4 +805,13 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }

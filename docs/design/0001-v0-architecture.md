@@ -152,9 +152,12 @@ git commit -am "deploy(web/prod): $DIGEST" && git push
 
 Ограничения v0:
 
-- поддерживаются только возможности Compose, которые понимает Swarm; `build`, `depends_on` как runtime-зависимость и т.п. отклоняются с внятной ошибкой;
-- используется только merge-семантика, без `!reset`/`!override`;
-- секреты приложения — ссылки на Docker secrets, значения в git не попадают.
+- поддерживаются только возможности Compose, которые WormCD умеет применить к Swarm; `build`, `depends_on` как runtime-зависимость и т.п. отклоняются с внятной ошибкой;
+- используется только merge-семантика, без `!reset`/`!override`; теги отклоняются при загрузке;
+- образы обязаны быть закреплены тегом или digest — иначе деплой недетерминирован;
+- секреты приложения — только external Docker secrets, значения в git не попадают;
+- configs адресуются по содержимому (`<name>_<sha256[:12]>`), поэтому изменение файла создаёт новый объект;
+- named volumes входят в нормализованную модель наряду с networks/configs/secrets.
 
 ## 5. Runtime interface
 
@@ -170,10 +173,11 @@ type Runtime interface {
 }
 
 type Desired struct {
+    Services []Service
     Networks []Network
     Configs  []Config
     Secrets  []Secret
-    Services []Service
+    Volumes  []Volume
 }
 ```
 

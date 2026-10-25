@@ -17,6 +17,18 @@ import (
 
 var updateGolden = flag.Bool("update", false, "update golden files")
 
+const appWithOverlay = `apiVersion: wormcd.dev/v1alpha1
+kind: Application
+metadata:
+  name: web
+spec:
+  compose: compose.yaml
+  targets:
+    - name: prod
+      cluster: prod-1
+      overlay: envs/prod.compose.yaml
+`
+
 func TestGoldenBasic(t *testing.T) {
 	state := load(t, filepath.Join("testdata", "basic", "wormcd.yaml"), "prod")
 
@@ -67,6 +79,9 @@ func TestLoadBasic(t *testing.T) {
 	}
 	if web.Replicas != 3 {
 		t.Errorf("replicas = %d, want 3", web.Replicas)
+	}
+	if web.EndpointMode != "dnsrr" {
+		t.Errorf("endpoint mode = %q, want dnsrr", web.EndpointMode)
 	}
 	if got := web.Env["APP_ENV"]; got != "prod" {
 		t.Errorf("APP_ENV = %q, want prod", got)
@@ -195,6 +210,9 @@ func TestLoadRejectsUnsupportedField(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "build") {
 		t.Fatalf("error = %v, want a build rejection", err)
 	}
+	if !strings.Contains(err.Error(), "services.web") {
+		t.Fatalf("error = %v, want the YAML path services.web", err)
+	}
 }
 
 func TestLoadRejectsUntaggedImage(t *testing.T) {
@@ -294,6 +312,165 @@ func TestLoadByAppNotFound(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), `application "missing" not found`) {
 		t.Fatalf("error = %v, want an application-not-found error", err)
+	}
+	if !strings.Contains(err.Error(), "invalid manifests") {
+		t.Fatalf("error = %v, want the invalid manifest to be reported", err)
+	}
+}
+
+func TestLoadBaseOnly(t *testing.T) {
+	path := writeApp(t, "", map[string]string{
+		"compose.yaml": `services:
+  web:
+    image: ghcr.io/d00p1/web:v1
+    ports:
+      - "8080:80"
+`,
+	})
+	state := load(t, path, "")
+
+	if state.Services[0].Replicas != 1 {
+		t.Errorf("replicas = %d, want the default 1", state.Services[0].Replicas)
+	}
+	if state.Services[0].EndpointMode != "vip" {
+		t.Errorf("endpoint mode = %q, want the default vip", state.Services[0].EndpointMode)
+	}
+	if len(state.Services[0].Ports) != 1 {
+		t.Errorf("ports = %+v, want one", state.Services[0].Ports)
+	}
+}
+
+func TestOverlayMergesLists(t *testing.T) {
+	path := writeApp(t, appWithOverlay, map[string]string{
+		"compose.yaml": `services:
+  web:
+    image: ghcr.io/d00p1/web:v1
+    ports:
+      - "8080:80"
+`,
+		"envs/prod.compose.yaml": `services:
+  web:
+    ports:
+      - "9090:90"
+`,
+	})
+	state := load(t, path, "prod")
+
+	ports := state.Services[0].Ports
+	if len(ports) != 2 {
+		t.Fatalf("ports = %+v, want two (overlay must append)", ports)
+	}
+	if ports[0].Target != 80 || ports[1].Target != 90 {
+		t.Fatalf("ports = %+v, want targets 80 and 90", ports)
+	}
+}
+
+func TestLoadRejectsOverrideTags(t *testing.T) {
+	tests := []struct {
+		name    string
+		overlay string
+		want    string
+	}{
+		{
+			name: "reset",
+			overlay: `services:
+  web:
+    ports: !reset []
+`,
+			want: "!reset",
+		},
+		{
+			name: "override",
+			overlay: `services:
+  web:
+    ports: !override
+      - "9090:90"
+`,
+			want: "!override",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeApp(t, appWithOverlay, map[string]string{
+				"compose.yaml": `services:
+  web:
+    image: ghcr.io/d00p1/web:v1
+    ports:
+      - "8080:80"
+`,
+				"envs/prod.compose.yaml": tt.overlay,
+			})
+			_, err := Load(context.Background(), Options{File: path, Target: "prod"})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want a %s rejection", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestManifestValidation(t *testing.T) {
+	valid := `apiVersion: wormcd.dev/v1alpha1
+kind: Application
+metadata:
+  name: web
+spec:
+  compose: compose.yaml
+  targets:
+    - name: prod
+      cluster: prod-1
+`
+	tests := []struct {
+		name string
+		app  string
+		want string
+	}{
+		{
+			name: "api version",
+			app:  strings.Replace(valid, "wormcd.dev/v1alpha1", "wormcd.dev/v2", 1),
+			want: "apiVersion",
+		},
+		{
+			name: "kind",
+			app:  strings.Replace(valid, "kind: Application", "kind: Deployment", 1),
+			want: "kind",
+		},
+		{
+			name: "compose",
+			app:  strings.Replace(valid, "  compose: compose.yaml\n", "", 1),
+			want: "spec.compose is required",
+		},
+		{
+			name: "name",
+			app:  strings.Replace(valid, "name: web", "name: Web", 1),
+			want: "metadata.name",
+		},
+		{
+			name: "duplicate target",
+			app: `apiVersion: wormcd.dev/v1alpha1
+kind: Application
+metadata:
+  name: web
+spec:
+  compose: compose.yaml
+  targets:
+    - name: prod
+      cluster: prod-1
+    - name: prod
+      cluster: prod-2
+`,
+			want: "duplicated",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeApp(t, tt.app, nil)
+			_, err := Load(context.Background(), Options{File: path})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
 	}
 }
 

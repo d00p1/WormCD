@@ -21,7 +21,8 @@ const (
 	KindVolume  Kind = "Volume"
 )
 
-// Key uniquely identifies an object inside one target.
+// Key uniquely identifies an object inside one target. The diff engine
+// (issue #4) uses it as the unit of planning.
 type Key struct {
 	Kind Kind   `json:"kind"`
 	Name string `json:"name"`
@@ -42,7 +43,8 @@ type Desired struct {
 	Volumes     []Volume  `json:"volumes"`
 }
 
-// ServiceMode is the Swarm service mode.
+// ServiceMode is the normalized scheduling mode. Runtimes map it onto their
+// own primitive; a runtime without a global mode can ignore it.
 type ServiceMode string
 
 const (
@@ -56,6 +58,7 @@ type Service struct {
 	Image           string            `json:"image"`
 	Mode            ServiceMode       `json:"mode"`
 	Replicas        uint64            `json:"replicas"`
+	EndpointMode    string            `json:"endpointMode"`
 	Command         *[]string         `json:"command,omitempty"`
 	Entrypoint      *[]string         `json:"entrypoint,omitempty"`
 	Env             map[string]string `json:"env,omitempty"`
@@ -85,7 +88,8 @@ type ServiceNetwork struct {
 	Aliases []string `json:"aliases,omitempty"`
 }
 
-// Port is a published service port.
+// Port is a published service port. Mode is the normalized publish mode
+// (ingress or host); runtimes without routing mesh use host.
 type Port struct {
 	Name      string `json:"name,omitempty"`
 	Target    uint32 `json:"target"`
@@ -170,7 +174,8 @@ type Healthcheck struct {
 	Retries     int           `json:"retries"`
 }
 
-// UpdateConfig is the normalized rollout configuration.
+// UpdateConfig is the normalized rollout policy. Runtimes without rolling
+// updates ignore it.
 type UpdateConfig struct {
 	Parallelism     uint64        `json:"parallelism"`
 	Delay           time.Duration `json:"delay"`
@@ -191,8 +196,8 @@ type Network struct {
 	External   bool              `json:"external,omitempty"`
 }
 
-// Config is a Docker config object. Data is not serialized: it can be large
-// and is never needed in a plan or a status report.
+// Config is a Docker config object. Data is serialized so a stored revision
+// can be re-applied without a fresh git checkout (see design 0001, section 6).
 type Config struct {
 	Name     string            `json:"name"`
 	Source   string            `json:"source"`
@@ -200,7 +205,7 @@ type Config struct {
 	Hash     string            `json:"hash,omitempty"`
 	Labels   map[string]string `json:"labels,omitempty"`
 	External bool              `json:"external,omitempty"`
-	Data     []byte            `json:"-"`
+	Data     []byte            `json:"data,omitempty"`
 }
 
 // Secret is an external Docker secret.
@@ -250,9 +255,10 @@ func (s *Service) sort() {
 	sort.Slice(s.Secrets, func(i, j int) bool { return s.Secrets[i].Target < s.Secrets[j].Target })
 }
 
-// Namespace is the prefix WormCD gives to every managed runtime object of a
-// target. It is stable and derived only from the application and target names.
-func Namespace(application, target string) string {
+// TargetNamespace is the prefix WormCD gives to every managed runtime object
+// of a target. It is stable and derived only from the application and target
+// names.
+func TargetNamespace(application, target string) string {
 	return sanitize("wormcd_" + application + "_" + target)
 }
 

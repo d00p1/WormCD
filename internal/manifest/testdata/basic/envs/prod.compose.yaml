@@ -5,3 +5,4 @@ services:
       APP_ENV: prod
     deploy:
       replicas: 3
+      endpoint_mode: dnsrr

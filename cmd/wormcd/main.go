@@ -110,12 +110,6 @@ func runRender(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *file == "" && *app == "" {
-		return errors.New("render: --file or --app is required")
-	}
-	if *file != "" && *app != "" {
-		return errors.New("render: --file and --app are mutually exclusive")
-	}
 	if *output != "human" && *output != "json" {
 		return fmt.Errorf("render: unsupported output format %q", *output)
 	}

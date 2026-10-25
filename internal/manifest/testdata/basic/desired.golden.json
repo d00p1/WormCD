@@ -8,6 +8,7 @@
       "image": "ghcr.io/d00p1/web@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
       "mode": "replicated",
       "replicas": 3,
+      "endpointMode": "dnsrr",
       "command": [
         "/app/server",
         "--verbose"
@@ -112,6 +113,7 @@
       "image": "ghcr.io/d00p1/worker:v1",
       "mode": "replicated",
       "replicas": 1,
+      "endpointMode": "vip",
       "env": {
         "APP_ENV": "staging"
       },
@@ -180,7 +182,8 @@
       "labels": {
         "com.wormcd.application": "web",
         "com.wormcd.target": "prod"
-      }
+      },
+      "data": "c2VydmVyIHsKICAgIGxpc3RlbiA4MDsKICAgIGxvY2F0aW9uIC8gewogICAgICAgIHJldHVybiAyMDAgIm9rXG4iOwogICAgfQp9Cg=="
     }
   ],
   "secrets": [
