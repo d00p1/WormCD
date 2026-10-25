@@ -19,7 +19,14 @@ are next.
 
 ## Development
 
-Requires Go 1.27+.
+Requires Go 1.27+ and [mise](https://mise.jdx.dev/). The toolchain and every
+linter version are pinned in `mise.toml`:
+
+```sh
+mise install          # install the pinned toolchain
+mise run check        # every check; this is the same command CI runs
+mise run fix          # apply safe autofixes, then review the diff
+```
 
 ```sh
 make build

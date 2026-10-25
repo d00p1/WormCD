@@ -8,7 +8,7 @@ LDFLAGS := -s -w \
 	-X github.com/d00p1/wormcd/internal/version.Commit=$(COMMIT) \
 	-X github.com/d00p1/wormcd/internal/version.Date=$(DATE)
 
-.PHONY: build test lint fmt tidy clean
+.PHONY: build test lint fmt check fix tidy clean
 
 build:
 	go build -trimpath -ldflags '$(LDFLAGS)' -o $(BINARY) ./cmd/wormcd
@@ -20,7 +20,13 @@ lint:
 	golangci-lint run
 
 fmt:
-	gofmt -l -w .
+	gofmt -s -l -w .
+
+check:
+	mise run check
+
+fix:
+	mise run fix
 
 tidy:
 	go mod tidy
