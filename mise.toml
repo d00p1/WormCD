@@ -1,0 +1,21 @@
+[tools]
+go = "1.27.3"
+golangci-lint = "2.15.0"
+hk = "2.8.1"
+typos = "1.51.1"
+betterleaks = "1.9.0"
+shellcheck = "0.11.0"
+"ubi:jdx/jactionlint" = "2.3.0"
+"aqua:fe3dback/go-arch-lint" = "1.19.0"
+
+[tasks.govulncheck]
+description = "Scan called Go code for known vulnerabilities"
+run = "go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./..."
+
+[tasks.check]
+description = "Run every quality gate (the same command CI runs)"
+run = "hk check --all"
+
+[tasks.fix]
+description = "Apply safe autofixes"
+run = "hk fix"

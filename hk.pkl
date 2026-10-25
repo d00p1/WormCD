@@ -1,0 +1,73 @@
+amends "package://github.com/jdx/hk/releases/download/v2.8.1/hk@2.8.1#/Config.pkl"
+import "package://github.com/jdx/hk/releases/download/v2.8.1/hk@2.8.1#/Builtins.pkl"
+
+local goFmt = Builtins.go_fmt
+local typos = Builtins.typos
+local betterleaks = Builtins.betterleaks
+local jactionlint = Builtins.jactionlint
+
+local goVet = Builtins.go_vet
+local golangciLint = Builtins.golangci_lint
+local goBuild = new Step {
+  check = "go build ./..."
+}
+local goTest = new Step {
+  check = "go test ./..."
+}
+local goArchLint = new Step {
+  check = "go-arch-lint check"
+}
+local govulncheck = new Step {
+  check = "mise run govulncheck"
+}
+local betterleaksHistory = new Step {
+  check = "betterleaks git --redact --verbose --no-banner"
+}
+
+hooks {
+  ["pre-commit"] {
+    fix = true
+    stage = true
+    stash = "git"
+    steps {
+      ["go-fmt"] = goFmt
+      ["typos"] = typos
+      ["betterleaks"] = betterleaks
+      ["jactionlint"] = jactionlint
+    }
+  }
+  ["pre-push"] {
+    steps {
+      ["go-vet"] = goVet
+      ["golangci-lint"] = golangciLint
+      ["go-build"] = goBuild
+      ["go-test"] = goTest
+      ["go-arch-lint"] = goArchLint
+      ["govulncheck"] = govulncheck
+      ["betterleaks-history"] = betterleaksHistory
+    }
+  }
+  ["check"] {
+    steps {
+      ["go-fmt"] = goFmt
+      ["typos"] = typos
+      ["betterleaks"] = betterleaks
+      ["jactionlint"] = jactionlint
+      ["go-vet"] = goVet
+      ["golangci-lint"] = golangciLint
+      ["go-build"] = goBuild
+      ["go-test"] = goTest
+      ["go-arch-lint"] = goArchLint
+      ["govulncheck"] = govulncheck
+      ["betterleaks-history"] = betterleaksHistory
+    }
+  }
+  ["fix"] {
+    fix = true
+    steps {
+      ["go-fmt"] = goFmt
+      ["typos"] = typos
+      ["jactionlint"] = jactionlint
+    }
+  }
+}
