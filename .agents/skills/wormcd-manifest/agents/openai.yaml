@@ -1,0 +1,3 @@
+interface:
+  display_name: "WormCD Manifest"
+  short_description: "Author wormcd.yaml, compose and overlays"

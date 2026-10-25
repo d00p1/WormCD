@@ -1,0 +1,62 @@
+services:
+  web:
+    image: ghcr.io/d00p1/wormcd-demo:v1
+    command: ["/app/server", "--listen", ":8080"]
+    environment:
+      APP_ENV: staging
+      LOG_LEVEL: info
+    ports:
+      - "8080:8080"
+    configs:
+      - source: app_config
+        target: /etc/wormcd/config.yaml
+    secrets:
+      - source: tls_key
+        target: /run/secrets/tls.key
+    volumes:
+      - data:/var/lib/wormcd
+    healthcheck:
+      test: ["CMD", "/app/server", "healthcheck"]
+      interval: 10s
+      timeout: 2s
+      retries: 3
+      start_period: 5s
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
+        reservations:
+          cpus: "0.25"
+          memory: 64M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+        failure_action: rollback
+      placement:
+        constraints:
+          - node.role == worker
+
+networks:
+  default:
+    driver: overlay
+    attachable: true
+
+volumes:
+  data: {}
+
+configs:
+  app_config:
+    file: ./configs/config.yaml
+
+secrets:
+  # v0 supports external Docker secrets only: the value never lives in git.
+  tls_key:
+    external: true
+    name: staging_tls_key

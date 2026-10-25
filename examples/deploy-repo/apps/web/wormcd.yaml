@@ -1,0 +1,21 @@
+apiVersion: wormcd.dev/v1alpha1
+kind: Application
+metadata:
+  name: web
+spec:
+  compose: compose.yaml
+  targets:
+    - name: staging
+      cluster: staging-1
+      overlay: envs/staging.compose.yaml
+      syncPolicy:
+        automated: true
+        prune: true
+        selfHeal: true
+    - name: prod
+      cluster: prod-1
+      overlay: envs/prod.compose.yaml
+      syncPolicy:
+        automated: true
+        prune: false
+        selfHeal: true

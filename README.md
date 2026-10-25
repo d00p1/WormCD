@@ -29,8 +29,9 @@ reconciliation (apply) is next.
 
 To try it now, write the manifests in a local checkout, create the labelled
 objects described in [cmd/wormcd/testdata/stand/README.md](cmd/wormcd/testdata/stand/README.md),
-and run `wormcd diff`. WormCD does not deploy yet — use `docker stack deploy`
-for the workload.
+and run `wormcd diff`. A complete, renderable deploy repo lives in
+[examples/deploy-repo](examples/deploy-repo/). WormCD does not deploy yet — use
+`docker stack deploy` for the workload.
 
 ## Development
 

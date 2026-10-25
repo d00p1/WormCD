@@ -1,0 +1,3 @@
+app:
+  name: wormcd-demo
+  greeting: hello from staging
