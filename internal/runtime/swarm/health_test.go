@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/d00p1/wormcd/internal/desired"
 	"github.com/d00p1/wormcd/internal/runtime"
@@ -93,18 +94,41 @@ func TestHealthReportsPausedUpdate(t *testing.T) {
 	}
 }
 
-func TestHealthReportsUpdateInProgress(t *testing.T) {
-	fake := healthFake(replicatedService(1))
-	fake.services.Items[0].UpdateStatus = &swarm.UpdateStatus{State: swarm.UpdateStateUpdating}
+func TestHealthReportsTasksStillStarting(t *testing.T) {
+	fake := healthFake(replicatedService(2))
+	fake.tasks[0].Status.State = swarm.TaskStatePreparing
+
+	health, err := newRuntime(fake).Health(context.Background(), healthScope())
+	if err != nil {
+		t.Fatalf("Health: %v", err)
+	}
+	want := []string{"service " + testService + ": 1 of 2 tasks running"}
+	if health.Healthy || !slices.Equal(health.Problems, want) {
+		t.Fatalf("health = %+v, want unhealthy with %v", health, want)
+	}
+}
+
+// TestHealthReportsCrashLoop: a failed task of the current revision is reported
+// with its error, even though Swarm already shut it down and started another.
+func TestHealthReportsCrashLoop(t *testing.T) {
+	service := replicatedService(1)
+	fake := healthFake(service)
+	fake.tasks = []swarm.Task{{
+		ID:           "crashing",
+		ServiceID:    service.ID,
+		DesiredState: swarm.TaskStateShutdown,
+		Status:       swarm.TaskStatus{State: swarm.TaskStateFailed, Err: "exec: no such file or directory"},
+		Spec:         service.Spec.TaskTemplate,
+	}, fake.defaultTasks(service)[0]}
 
 	health, err := newRuntime(fake).Health(context.Background(), healthScope())
 	if err != nil {
 		t.Fatalf("Health: %v", err)
 	}
 	if health.Healthy || !slices.ContainsFunc(health.Problems, func(p string) bool {
-		return strings.HasSuffix(p, "update in progress")
+		return strings.Contains(p, "exec: no such file or directory")
 	}) {
-		t.Fatalf("health = %+v, want an update in progress reported", health)
+		t.Fatalf("health = %+v, want the crash reported with its error", health)
 	}
 }
 
@@ -156,4 +180,43 @@ func TestHealthReturnsAPIError(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "daemon down") {
 		t.Fatalf("error = %v, want the API error", err)
 	}
+}
+
+func TestProgressReportsUpdateInProgressOnlyWhenNothingElseIsMissing(t *testing.T) {
+	updating := serviceStatus{Version: 2, Desired: 1, DesiredKnown: true, Running: 1, Update: swarm.UpdateStateUpdating}
+	if got := updating.progress(); got != "update in progress" {
+		t.Fatalf("progress = %q, want an update in progress", got)
+	}
+	if got := updating.pending(0); got != "update in progress" {
+		t.Fatalf("pending = %q, want the update in progress", got)
+	}
+	if got := updating.failures(); len(got) != 0 {
+		t.Fatalf("failures = %v, want none for a running update", got)
+	}
+}
+
+func TestIsCurrentComparesSpecAndCreation(t *testing.T) {
+	service := replicatedService(1)
+	service.UpdatedAt = time.Now()
+	task := fakeAPITask(service)
+	task.CreatedAt = service.UpdatedAt
+	if !isCurrent(task, service) {
+		t.Fatal("a task of the service's spec and creation time is not current")
+	}
+
+	older := task
+	older.CreatedAt = service.UpdatedAt.Add(-time.Second)
+	if isCurrent(older, service) {
+		t.Fatal("a task created before the last update is current")
+	}
+
+	other := task
+	other.Spec.ContainerSpec = &swarm.ContainerSpec{Image: "web:v0"}
+	if isCurrent(other, service) {
+		t.Fatal("a task of another spec is current")
+	}
+}
+
+func fakeAPITask(service swarm.Service) swarm.Task {
+	return (&fakeAPI{}).defaultTasks(service)[0]
 }

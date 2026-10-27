@@ -7,6 +7,7 @@ import (
 	"slices"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/api/types/swarm"
 	"github.com/moby/moby/api/types/volume"
@@ -17,9 +18,12 @@ import (
 // calls return, so tests can check the cluster state after Apply and Prune.
 // Every mutating call is recorded in calls; err is returned by every call.
 //
-// Tasks are created by a service create or update. tasksFor decides what they
-// look like; by default every desired task runs. A failed task that is meant to
-// run pauses the update, as Swarm does.
+// A service create or update starts the tasks of a revision: tasksFor decides
+// what they look like, and by default every desired task runs. An update does
+// not finish by itself. Like Swarm's updater, the fake settles an update when
+// the List calls run: a failed new task pauses it, and once the new tasks
+// run, the old tasks are shut down and the update completes. Old tasks keep
+// running until then.
 type fakeAPI struct {
 	services client.ServiceListResult
 	networks client.NetworkListResult
@@ -42,6 +46,7 @@ func (f *fakeAPI) ServiceList(_ context.Context, options client.ServiceListOptio
 	if f.err != nil {
 		return client.ServiceListResult{}, f.err
 	}
+	f.settle()
 	if !options.Status {
 		return f.services, nil
 	}
@@ -67,6 +72,7 @@ func (f *fakeAPI) TaskList(_ context.Context, options client.TaskListOptions) (c
 	if f.err != nil {
 		return client.TaskListResult{}, f.err
 	}
+	f.settle()
 	var out client.TaskListResult
 	for _, task := range f.tasks {
 		if !filterHas(options.Filters, "service", task.ServiceID) {
@@ -96,7 +102,7 @@ func (f *fakeAPI) ServiceInspect(_ context.Context, name string, _ client.Servic
 			return client.ServiceInspectResult{Service: service}, nil
 		}
 	}
-	return client.ServiceInspectResult{}, fmt.Errorf("service %s not found", name)
+	return client.ServiceInspectResult{}, cerrdefs.ErrNotFound.WithMessage("service " + name + " not found")
 }
 
 // ServiceCreate stores the service with version 1 and starts its tasks.
@@ -106,14 +112,15 @@ func (f *fakeAPI) ServiceCreate(_ context.Context, options client.ServiceCreateO
 	if f.err != nil {
 		return client.ServiceCreateResult{}, f.err
 	}
-	service := swarm.Service{ID: "id-" + name, Meta: swarm.Meta{Version: swarm.Version{Index: 1}}, Spec: options.Spec}
+	service := swarm.Service{ID: "id-" + name, Meta: swarm.Meta{Version: swarm.Version{Index: 1}, UpdatedAt: time.Now()}, Spec: options.Spec}
 	f.services.Items = append(f.services.Items, service)
 	f.startTasks(service)
 	return client.ServiceCreateResult{ID: service.ID}, nil
 }
 
 // ServiceUpdate mirrors Docker: the version must match the stored service. The
-// update pauses when a new task fails, and completes otherwise.
+// update is started, not finished: its tasks are added, and the old ones keep
+// running until settle retires them.
 func (f *fakeAPI) ServiceUpdate(_ context.Context, id string, options client.ServiceUpdateOptions) (client.ServiceUpdateResult, error) {
 	f.calls = append(f.calls, "ServiceUpdate:"+id)
 	if f.err != nil {
@@ -129,6 +136,8 @@ func (f *fakeAPI) ServiceUpdate(_ context.Context, id string, options client.Ser
 		}
 		service.Spec = options.Spec
 		service.Version.Index++
+		service.UpdatedAt = time.Now()
+		service.UpdateStatus = &swarm.UpdateStatus{State: swarm.UpdateStateUpdating}
 		f.services.Items[i] = service
 		f.startTasks(service)
 		return client.ServiceUpdateResult{}, nil
@@ -142,15 +151,17 @@ func (f *fakeAPI) ServiceRemove(_ context.Context, id string, _ client.ServiceRe
 	if f.err != nil {
 		return client.ServiceRemoveResult{}, f.err
 	}
+	if !slices.ContainsFunc(f.services.Items, func(s swarm.Service) bool { return s.ID == id }) {
+		return client.ServiceRemoveResult{}, cerrdefs.ErrNotFound.WithMessage("service " + id + " not found")
+	}
 	f.services.Items = slices.DeleteFunc(f.services.Items, func(s swarm.Service) bool { return s.ID == id })
 	f.tasks = slices.DeleteFunc(f.tasks, func(t swarm.Task) bool { return t.ServiceID == id })
 	return client.ServiceRemoveResult{}, nil
 }
 
-// startTasks replaces the tasks of service with the ones tasksFor describes and
-// sets the update state the way Swarm would.
+// startTasks adds the tasks of the service's current revision. Tasks of earlier
+// revisions are left alone.
 func (f *fakeAPI) startTasks(service swarm.Service) {
-	f.tasks = slices.DeleteFunc(f.tasks, func(t swarm.Task) bool { return t.ServiceID == service.ID })
 	tasks := f.defaultTasks(service)
 	if f.tasksFor != nil {
 		tasks = f.tasksFor(service)
@@ -162,23 +173,50 @@ func (f *fakeAPI) startTasks(service swarm.Service) {
 		}
 	}
 	f.tasks = append(f.tasks, tasks...)
+}
 
-	for i, item := range f.services.Items {
-		if item.ID != service.ID {
+// settle plays Swarm's updater for every service with an update in progress. A
+// failed task of the new revision pauses the update. Once every desired task of
+// the new revision runs, the tasks of older revisions are shut down and the update
+// completes.
+func (f *fakeAPI) settle() {
+	for i, service := range f.services.Items {
+		if service.UpdateStatus == nil || service.UpdateStatus.State != swarm.UpdateStateUpdating {
 			continue
 		}
-		item.UpdatedAt = now
-		item.UpdateStatus = &swarm.UpdateStatus{State: swarm.UpdateStateCompleted}
-		for _, task := range tasks {
-			if task.Status.State == swarm.TaskStateFailed && task.DesiredState == swarm.TaskStateRunning {
-				item.UpdateStatus = &swarm.UpdateStatus{State: swarm.UpdateStatePaused, Message: "task failed"}
+		var running uint64
+		var failed bool
+		for _, task := range f.tasks {
+			if task.ServiceID != service.ID || !isCurrent(task, service) {
+				continue
+			}
+			switch {
+			case task.Status.State == swarm.TaskStateFailed || task.Status.State == swarm.TaskStateRejected:
+				failed = true
+			case task.DesiredState == swarm.TaskStateRunning && task.Status.State == swarm.TaskStateRunning:
+				running++
 			}
 		}
-		f.services.Items[i] = item
+		if failed {
+			service.UpdateStatus = &swarm.UpdateStatus{State: swarm.UpdateStatePaused, Message: "task failed"}
+			f.services.Items[i] = service
+			continue
+		}
+		if desiredCount, _ := desiredTasks(service); running < desiredCount {
+			continue
+		}
+		for j, task := range f.tasks {
+			if task.ServiceID == service.ID && !isCurrent(task, service) {
+				f.tasks[j].DesiredState = swarm.TaskStateShutdown
+				f.tasks[j].Status.State = swarm.TaskStateShutdown
+			}
+		}
+		service.UpdateStatus = &swarm.UpdateStatus{State: swarm.UpdateStateCompleted}
+		f.services.Items[i] = service
 	}
 }
 
-// defaultTasks runs every desired task.
+// defaultTasks runs every desired task of the service's spec.
 func (f *fakeAPI) defaultTasks(service swarm.Service) []swarm.Task {
 	count, _ := desiredTasks(service)
 	tasks := make([]swarm.Task, 0, count)

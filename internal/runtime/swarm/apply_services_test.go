@@ -120,8 +120,10 @@ func TestApplyUpdatesServiceWithItsVersion(t *testing.T) {
 	existing := runningService("web:v1")
 	fake := clusterWithService(&existing)
 	plan := completePlan(withService(testDesired(), "web:v2"), updateEntry("image"))
+	r := newRuntime(fake)
+	r.converge = fastConvergence
 
-	result, err := newRuntime(fake).Apply(context.Background(), plan)
+	result, err := r.Apply(context.Background(), plan)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -185,11 +187,15 @@ func TestApplyFailsWhenUpdatePausesOnBrokenImage(t *testing.T) {
 	r.converge = fastConvergence
 
 	_, err := r.Apply(context.Background(), plan)
-	if err == nil || !strings.Contains(err.Error(), "update paused") {
-		t.Fatalf("error = %v, want the paused update", err)
+	if err == nil || !strings.Contains(err.Error(), "pull access denied for web:broken") {
+		t.Fatalf("error = %v, want the failed task of the new revision", err)
 	}
-	if fake.services.Items[0].UpdateStatus.State != swarm.UpdateStatePaused {
-		t.Errorf("update state = %s, want paused", fake.services.Items[0].UpdateStatus.State)
+	statuses, err := r.serviceStatuses(context.Background(), nil, func(swarm.Service) bool { return true })
+	if err != nil {
+		t.Fatalf("serviceStatuses: %v", err)
+	}
+	if statuses[0].Update != swarm.UpdateStatePaused {
+		t.Errorf("update state = %s, want paused", statuses[0].Update)
 	}
 }
 
@@ -205,6 +211,7 @@ func TestApplyFailsOnCrashLoop(t *testing.T) {
 			ServiceID:    service.ID,
 			DesiredState: swarm.TaskStateShutdown,
 			Status:       swarm.TaskStatus{State: swarm.TaskStateFailed, Err: "exec: no such file or directory"},
+			Spec:         service.Spec.TaskTemplate,
 		}}
 	}
 	plan := completePlan(withService(testDesired(), "web:v1"), create(desired.KindService, testService))
@@ -425,10 +432,12 @@ func TestApplyThenPruneRemovesReplacedConfig(t *testing.T) {
 		deleteEntry(desired.KindConfig, testOldConfig),
 	)
 
-	if _, err := newRuntime(fake).Apply(context.Background(), plan); err != nil {
+	r := newRuntime(fake)
+	r.converge = fastConvergence
+	if _, err := r.Apply(context.Background(), plan); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if _, err := newRuntime(fake).Prune(context.Background(), runtime.Scope{Application: "web", Target: "prod"}, testKeep()); err != nil {
+	if _, err := r.Prune(context.Background(), runtime.Scope{Application: "web", Target: "prod"}, testKeep()); err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
 
@@ -437,4 +446,56 @@ func TestApplyThenPruneRemovesReplacedConfig(t *testing.T) {
 	if update < 0 || remove < 0 || update > remove {
 		t.Fatalf("calls = %v, want the service update before the old config is removed", fake.calls)
 	}
+}
+
+// TestApplyDoesNotCountOldTasksAfterUpdate: right after ServiceUpdate the old
+// tasks still run. They are not the new revision, so they must not make the
+// service converged.
+func TestApplyDoesNotCountOldTasksAfterUpdate(t *testing.T) {
+	existing := runningService("web:v1")
+	fake := clusterWithService(&existing)
+	fake.tasksFor = pendingTasks
+	plan := completePlan(withService(testDesired(), "web:v2"), updateEntry("image"))
+	r := newRuntime(fake)
+	r.converge = convergence{Interval: time.Millisecond, Timeout: 20 * time.Millisecond}
+
+	_, err := r.Apply(context.Background(), plan)
+	if err == nil || !strings.Contains(err.Error(), "not converged (0 of 1 tasks running)") {
+		t.Fatalf("error = %v, want the old running task not to count", err)
+	}
+	if running := countTasks(fake.tasks, swarm.TaskStateRunning, existing.ID); running != 1 {
+		t.Fatalf("old running tasks = %d, want the updater to leave them until the new revision runs", running)
+	}
+}
+
+// TestApplyConvergesOnNewRevisionTasks: once the new revision runs, the updater
+// shuts the old tasks down and Apply succeeds.
+func TestApplyConvergesOnNewRevisionTasks(t *testing.T) {
+	existing := runningService("web:v1")
+	fake := clusterWithService(&existing)
+	plan := completePlan(withService(testDesired(), "web:v2"), updateEntry("image"))
+	r := newRuntime(fake)
+	r.converge = fastConvergence
+
+	if _, err := r.Apply(context.Background(), plan); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if running := countTasks(fake.tasks, swarm.TaskStateRunning, existing.ID); running != 1 {
+		t.Fatalf("running tasks = %d, want only the new revision's task", running)
+	}
+	for _, task := range fake.tasks {
+		if task.Spec.ContainerSpec.Image != "web:v2" && task.DesiredState == swarm.TaskStateRunning {
+			t.Fatalf("task %s runs the old revision", task.ID)
+		}
+	}
+}
+
+func countTasks(tasks []swarm.Task, state swarm.TaskState, serviceID string) int {
+	n := 0
+	for _, task := range tasks {
+		if task.ServiceID == serviceID && task.Status.State == state {
+			n++
+		}
+	}
+	return n
 }
