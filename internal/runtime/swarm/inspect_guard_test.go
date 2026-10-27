@@ -2,6 +2,7 @@ package swarm
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -28,13 +29,18 @@ func TestInspectAPIIsReadOnly(t *testing.T) {
 // labels in place. Secrets, networks and volumes have no in-place update.
 func TestWriteAPIIsCreateOrRemove(t *testing.T) {
 	typ := reflect.TypeOf((*writeAPI)(nil)).Elem()
+	var updates []string
 	for i := 0; i < typ.NumMethod(); i++ {
 		name := typ.Method(i).Name
-		if name == "ConfigUpdate" {
-			continue
+		switch {
+		case strings.HasSuffix(name, "Create"), strings.HasSuffix(name, "Remove"):
+		case strings.HasSuffix(name, "Update"):
+			updates = append(updates, name)
+		default:
+			t.Errorf("writeAPI method %q is not a create, remove or update call", name)
 		}
-		if !strings.HasSuffix(name, "Create") && !strings.HasSuffix(name, "Remove") {
-			t.Errorf("writeAPI method %q is not a create or remove call", name)
-		}
+	}
+	if want := []string{"ConfigUpdate"}; !slices.Equal(updates, want) {
+		t.Errorf("writeAPI updates = %v, want exactly %v", updates, want)
 	}
 }

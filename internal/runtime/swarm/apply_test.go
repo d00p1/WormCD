@@ -62,6 +62,46 @@ func testPlan(desiredState desired.Desired, entries ...runtime.Entry) runtime.Pl
 	return plan
 }
 
+// completePlan is testPlan plus a Noop entry for every managed object that the
+// given entries do not cover, the way a real diff lists every desired object.
+func completePlan(desiredState desired.Desired, entries ...runtime.Entry) runtime.Plan {
+	covered := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		covered[entry.Key] = true
+	}
+	for _, key := range managedKeys(desiredState) {
+		if !covered[key] {
+			entries = append(entries, runtime.Entry{Key: key, Action: runtime.Noop})
+		}
+	}
+	return testPlan(desiredState, entries...)
+}
+
+func managedKeys(desiredState desired.Desired) []string {
+	var keys []string
+	for _, n := range desiredState.Networks {
+		if n.Managed() {
+			keys = append(keys, desired.Key{Kind: desired.KindNetwork, Name: n.Name}.String())
+		}
+	}
+	for _, c := range desiredState.Configs {
+		if c.Managed() {
+			keys = append(keys, desired.Key{Kind: desired.KindConfig, Name: c.Name}.String())
+		}
+	}
+	for _, s := range desiredState.Secrets {
+		if s.Managed() {
+			keys = append(keys, desired.Key{Kind: desired.KindSecret, Name: s.Name}.String())
+		}
+	}
+	for _, v := range desiredState.Volumes {
+		if v.Managed() {
+			keys = append(keys, desired.Key{Kind: desired.KindVolume, Name: v.Name}.String())
+		}
+	}
+	return keys
+}
+
 func create(kind desired.Kind, name string) runtime.Entry {
 	return runtime.Entry{Key: desired.Key{Kind: kind, Name: name}.String(), Action: runtime.Create}
 }
@@ -191,7 +231,7 @@ func TestApplyRejectsImmutableUpdates(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fake := &fakeAPI{}
-			_, err := newRuntime(fake).Apply(context.Background(), testPlan(testDesired(), tt.entry))
+			_, err := newRuntime(fake).Apply(context.Background(), completePlan(testDesired(), tt.entry))
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("error = %v, want %q", err, tt.want)
 			}
@@ -199,6 +239,38 @@ func TestApplyRejectsImmutableUpdates(t *testing.T) {
 				t.Fatalf("calls = %v, want none", fake.calls)
 			}
 		})
+	}
+}
+
+func TestApplyRefusesUnsupportedUpdateBeforeAnyCreate(t *testing.T) {
+	fake := &fakeAPI{}
+	plan := completePlan(testDesired(),
+		create(desired.KindNetwork, testNetwork),
+		runtime.Entry{Key: "Volume/" + testVolume, Action: runtime.Update, Changes: []string{"driverOpts"}},
+	)
+
+	_, err := newRuntime(fake).Apply(context.Background(), plan)
+	if err == nil || !strings.Contains(err.Error(), "in-place update is not supported") {
+		t.Fatalf("error = %v, want an in-place update error for the volume", err)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("calls = %v, want none: the network must not be created when the volume update is refused", fake.calls)
+	}
+}
+
+func TestApplyRejectsManagedObjectMissingFromPlan(t *testing.T) {
+	fake := &fakeAPI{}
+	plan := testPlan(testDesired(),
+		create(desired.KindNetwork, testNetwork),
+		create(desired.KindConfig, testConfig),
+	)
+
+	_, err := newRuntime(fake).Apply(context.Background(), plan)
+	if err == nil || !strings.Contains(err.Error(), "Volume/"+testVolume+": missing from the plan") {
+		t.Fatalf("error = %v, want a missing-entry error for the volume", err)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("calls = %v, want none", fake.calls)
 	}
 }
 
@@ -213,7 +285,7 @@ func TestApplyUpdatesConfigLabelsInPlace(t *testing.T) {
 	existing.Version = swarm.Version{Index: 7}
 	fake := &fakeAPI{configs: client.ConfigListResult{Items: []swarm.Config{existing}}}
 
-	plan := testPlan(desiredState,
+	plan := completePlan(desiredState,
 		runtime.Entry{Key: "Config/" + testConfig, Action: runtime.Update, Changes: []string{"labels.team"}},
 	)
 	result, err := newRuntime(fake).Apply(context.Background(), plan)
@@ -241,7 +313,7 @@ func TestApplyUpdatesConfigLabelsInPlace(t *testing.T) {
 
 	// The plan is applied once; a second Apply with the Noop entry must not touch the config.
 	fake.calls = nil
-	noop := testPlan(desiredState, runtime.Entry{Key: "Config/" + testConfig, Action: runtime.Noop})
+	noop := completePlan(desiredState, runtime.Entry{Key: "Config/" + testConfig, Action: runtime.Noop})
 	if _, err := newRuntime(fake).Apply(context.Background(), noop); err != nil {
 		t.Fatalf("second Apply: %v", err)
 	}
@@ -257,7 +329,7 @@ func TestApplyRejectsNonLabelConfigUpdate(t *testing.T) {
 	existing.Spec.Data = []byte("server {}")
 	fake := &fakeAPI{configs: client.ConfigListResult{Items: []swarm.Config{existing}}}
 
-	plan := testPlan(testDesired(),
+	plan := completePlan(testDesired(),
 		runtime.Entry{Key: "Config/" + testConfig, Action: runtime.Update, Changes: []string{"labels.team", "data"}},
 	)
 	_, err := newRuntime(fake).Apply(context.Background(), plan)
@@ -274,7 +346,7 @@ func TestApplyRejectsSecretUpdate(t *testing.T) {
 	desiredState.Secrets = []desired.Secret{{Name: "managed", Source: "managed"}}
 	fake := &fakeAPI{}
 
-	_, err := newRuntime(fake).Apply(context.Background(), testPlan(desiredState,
+	_, err := newRuntime(fake).Apply(context.Background(), completePlan(desiredState,
 		runtime.Entry{Key: "Secret/managed", Action: runtime.Update, Changes: []string{"labels.team"}},
 	))
 	if err == nil || !strings.Contains(err.Error(), "secrets are immutable") {
@@ -290,7 +362,7 @@ func TestApplyRejectsManagedSecret(t *testing.T) {
 	desiredState.Secrets = []desired.Secret{{Name: "managed", Source: "managed"}}
 	fake := &fakeAPI{}
 
-	_, err := newRuntime(fake).Apply(context.Background(), testPlan(desiredState, create(desired.KindSecret, "managed")))
+	_, err := newRuntime(fake).Apply(context.Background(), completePlan(desiredState, create(desired.KindSecret, "managed")))
 	if err == nil || !strings.Contains(err.Error(), "managed secrets are not supported") {
 		t.Fatalf("error = %v, want a managed-secret error", err)
 	}
@@ -317,7 +389,7 @@ func TestApplyRejectsPlanForAnotherTarget(t *testing.T) {
 
 func TestApplyStopsOnAPIError(t *testing.T) {
 	fake := &fakeAPI{err: errors.New("boom")}
-	_, err := newRuntime(fake).Apply(context.Background(), testPlan(testDesired(),
+	_, err := newRuntime(fake).Apply(context.Background(), completePlan(testDesired(),
 		create(desired.KindNetwork, testNetwork),
 		create(desired.KindVolume, testVolume),
 	))
