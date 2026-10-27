@@ -3,6 +3,7 @@ package swarm
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/d00p1/wormcd/internal/desired"
@@ -11,15 +12,18 @@ import (
 	"github.com/moby/moby/client"
 )
 
-// Apply creates the networks, configs, secrets and volumes that a plan asks
-// for, in that order. Entries with Noop or Delete actions do nothing here:
-// deletions belong to Prune, which runs after the services have moved off the
-// old objects.
+// Apply creates the networks, configs, secrets, volumes and services that a
+// plan asks for, in that order, and updates the services and configs in place.
+// Services are created or updated only after their networks, configs, secrets
+// and volumes exist. Service deletions run before the service creates and
+// updates, and every object that is only referenced by an old service is left
+// to Prune, which runs after the services have moved off it. A service is
+// reported as converged only once it runs its desired tasks (see converge.go).
 //
 // Configs change in place only by their labels, through ConfigUpdate: Docker
 // fixes a config's data, so a content change arrives as a new name (the hash is
 // part of it). Secrets have no in-place update in v0, so an Update on them is an
-// error. Service changes are not applied until #18.
+// error.
 func (r *Runtime) Apply(ctx context.Context, plan runtime.Plan) (runtime.Result, error) {
 	desiredState := plan.Desired
 	scope := runtime.Scope{Application: desiredState.Application, Target: desiredState.Target}
@@ -34,9 +38,6 @@ func (r *Runtime) Apply(ctx context.Context, plan runtime.Plan) (runtime.Result,
 	entries := make(map[string]runtime.Entry, len(plan.Entries))
 	for _, entry := range plan.Entries {
 		entries[entry.Key] = entry
-		if isService(entry.Key) && entry.Action != runtime.Noop {
-			return runtime.Result{}, fmt.Errorf("%s: %s is not implemented yet (see #18)", entry.Key, entry.Action)
-		}
 	}
 
 	if err := preflight(desiredState, entries); err != nil {
@@ -64,6 +65,11 @@ func (r *Runtime) Apply(ctx context.Context, plan runtime.Plan) (runtime.Result,
 		r.createVolume(scope), nil); err != nil {
 		return result, err
 	}
+	if err := applyObjects(ctx, &result, entries, desired.KindService, desiredState.Services,
+		func(s desired.Service) string { return s.Name },
+		r.createService(scope), r.updateService(scope)); err != nil {
+		return result, err
+	}
 	return result, nil
 }
 
@@ -83,8 +89,69 @@ func preflight(desiredState desired.Desired, entries map[string]runtime.Entry) e
 		func(s desired.Secret) string { return s.Name }, secretCheck); err != nil {
 		return err
 	}
-	return checkObjects(entries, desired.KindVolume, desiredState.Volumes,
-		func(v desired.Volume) string { return v.Name }, onUpdate(volumeUpdateError))
+	if err := checkObjects(entries, desired.KindVolume, desiredState.Volumes,
+		func(v desired.Volume) string { return v.Name }, onUpdate(volumeUpdateError)); err != nil {
+		return err
+	}
+	return preflightServices(desiredState, entries)
+}
+
+// preflightServices checks every desired service before the first mutation: it
+// needs a plan entry, its references must be declared, and its spec must be
+// convertible. A mode change is refused, because Docker does not allow it in
+// place.
+func preflightServices(desiredState desired.Desired, entries map[string]runtime.Entry) error {
+	for _, service := range desiredState.Services {
+		key := desired.Key{Kind: desired.KindService, Name: service.Name}.String()
+		entry, ok := entries[key]
+		if !ok {
+			return fmt.Errorf("%s: missing from the plan", key)
+		}
+		switch entry.Action {
+		case runtime.Create:
+		case runtime.Update:
+			if slices.Contains(entry.Changes, "mode") {
+				return fmt.Errorf("%s: service mode cannot change in place (%s); recreate the service by hand",
+					key, strings.Join(entry.Changes, ", "))
+			}
+		default:
+			continue
+		}
+		if err := validateService(service, desiredState); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateService runs the checks of serviceSpec that need no Docker IDs, and
+// checks that every reference is declared in the desired state.
+func validateService(service desired.Service, desiredState desired.Desired) error {
+	if _, err := serviceMode(service); err != nil {
+		return fmt.Errorf("service %s: %w", service.Name, err)
+	}
+	if _, err := mountSpecs(service.Mounts); err != nil {
+		return fmt.Errorf("service %s: %w", service.Name, err)
+	}
+	declaredConfigs := make(map[string]bool, len(desiredState.Configs))
+	for _, config := range desiredState.Configs {
+		declaredConfigs[config.Name] = true
+	}
+	for _, ref := range service.Configs {
+		if !declaredConfigs[ref.Source] {
+			return fmt.Errorf("service %s: config %s is not declared in the desired state", service.Name, ref.Source)
+		}
+	}
+	declaredSecrets := make(map[string]bool, len(desiredState.Secrets))
+	for _, secret := range desiredState.Secrets {
+		declaredSecrets[secret.Name] = true
+	}
+	for _, ref := range service.Secrets {
+		if !declaredSecrets[ref.Source] {
+			return fmt.Errorf("service %s: secret %s is not declared in the desired state", service.Name, ref.Source)
+		}
+	}
+	return nil
 }
 
 // checkObjects reports an error for a managed object that has no entry in the
@@ -244,10 +311,6 @@ func (r *Runtime) createVolume(scope runtime.Scope) func(context.Context, desire
 		}
 		return nil
 	}
-}
-
-func isService(key string) bool {
-	return strings.HasPrefix(key, string(desired.KindService)+"/")
 }
 
 // configChangeError refuses a config update that changes anything but labels.

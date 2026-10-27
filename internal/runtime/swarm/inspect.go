@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"strings"
+	"time"
 
 	"github.com/d00p1/wormcd/internal/desired"
 	"github.com/d00p1/wormcd/internal/runtime"
@@ -18,21 +19,37 @@ import (
 	"github.com/moby/moby/client"
 )
 
-// readAPI is the subset of the Docker SDK used by Inspect. It exists so tests
-// can use a fake without a live daemon.
+// readAPI is the subset of the Docker SDK used by Inspect, and by Health and
+// the convergence wait through TaskList. It exists so tests can use a fake
+// without a live daemon.
 type readAPI interface {
 	ServiceList(context.Context, client.ServiceListOptions) (client.ServiceListResult, error)
+	TaskList(context.Context, client.TaskListOptions) (client.TaskListResult, error)
 	NetworkList(context.Context, client.NetworkListOptions) (client.NetworkListResult, error)
 	ConfigList(context.Context, client.ConfigListOptions) (client.ConfigListResult, error)
 	SecretList(context.Context, client.SecretListOptions) (client.SecretListResult, error)
 	VolumeList(context.Context, client.VolumeListOptions) (client.VolumeListResult, error)
 }
 
-// configReader is the read-only config call used by updateConfig to get the
-// version for ConfigUpdate. It is kept out of readAPI, because Inspect does not
-// need it, and out of writeAPI, so the write guard never sees a read method.
+// configReader is the read-only config call used by Apply to get the version
+// for ConfigUpdate and the ID for a service reference. It is kept out of
+// readAPI, because Inspect does not need it, and out of writeAPI, so the write
+// guard never sees a read method.
 type configReader interface {
 	ConfigInspect(context.Context, string, client.ConfigInspectOptions) (client.ConfigInspectResult, error)
+}
+
+// serviceReader is the read-only service call used by Apply to get the version
+// and ID for ServiceUpdate and ServiceRemove. It is kept out of readAPI for the
+// same reason as configReader.
+type serviceReader interface {
+	ServiceInspect(context.Context, string, client.ServiceInspectOptions) (client.ServiceInspectResult, error)
+}
+
+// secretReader is the read-only secret call used by Apply to get the ID of an
+// external secret that a service references.
+type secretReader interface {
+	SecretInspect(context.Context, string, client.SecretInspectOptions) (client.SecretInspectResult, error)
 }
 
 // writeAPI is the subset of the Docker SDK used by Apply and Prune.
@@ -44,6 +61,8 @@ type writeAPI interface {
 	ConfigRemove(context.Context, string, client.ConfigRemoveOptions) (client.ConfigRemoveResult, error)
 	SecretCreate(context.Context, client.SecretCreateOptions) (client.SecretCreateResult, error)
 	SecretRemove(context.Context, string, client.SecretRemoveOptions) (client.SecretRemoveResult, error)
+	ServiceCreate(context.Context, client.ServiceCreateOptions) (client.ServiceCreateResult, error)
+	ServiceUpdate(context.Context, string, client.ServiceUpdateOptions) (client.ServiceUpdateResult, error)
 	VolumeCreate(context.Context, client.VolumeCreateOptions) (client.VolumeCreateResult, error)
 	VolumeRemove(context.Context, string, client.VolumeRemoveOptions) (client.VolumeRemoveResult, error)
 }
@@ -52,12 +71,22 @@ type writeAPI interface {
 type api interface {
 	readAPI
 	configReader
+	serviceReader
+	secretReader
 	writeAPI
 }
 
 // Runtime reads Swarm state through the Docker Engine API.
 type Runtime struct {
-	api api
+	api      api
+	converge convergence
+}
+
+// convergence bounds how long Apply waits for a service to converge: it polls
+// every Interval and gives up after Timeout.
+type convergence struct {
+	Interval time.Duration
+	Timeout  time.Duration
 }
 
 // New returns a Swarm runtime backed by a Docker client.
@@ -66,7 +95,10 @@ func New(api *client.Client) *Runtime {
 }
 
 func newRuntime(api api) *Runtime {
-	return &Runtime{api: api}
+	return &Runtime{
+		api:      api,
+		converge: convergence{Interval: 2 * time.Second, Timeout: 10 * time.Minute},
+	}
 }
 
 // Kind returns the runtime kind.

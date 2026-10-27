@@ -15,19 +15,199 @@ import (
 // fakeAPI is an in-memory Docker. Creates and removals change what the list
 // calls return, so tests can check the cluster state after Apply and Prune.
 // Every mutating call is recorded in calls; err is returned by every call.
+//
+// Tasks are created by a service create or update. tasksFor decides what they
+// look like; by default every desired task runs. An update that leaves a failed
+// task pauses, as Swarm does.
 type fakeAPI struct {
 	services client.ServiceListResult
 	networks client.NetworkListResult
 	configs  client.ConfigListResult
 	secrets  client.SecretListResult
 	volumes  client.VolumeListResult
-	err      error
+	tasks    []swarm.Task
+	tasksFor func(swarm.Service) []swarm.Task
+	// onTaskList runs before every TaskList call, so a test can let tasks
+	// progress between two polls.
+	onTaskList func()
+	err        error
 
 	calls []string
 }
 
-func (f *fakeAPI) ServiceList(context.Context, client.ServiceListOptions) (client.ServiceListResult, error) {
-	return f.services, f.err
+// ServiceList fills in the task counts when the caller asks for status, as
+// Docker does.
+func (f *fakeAPI) ServiceList(_ context.Context, options client.ServiceListOptions) (client.ServiceListResult, error) {
+	if f.err != nil {
+		return client.ServiceListResult{}, f.err
+	}
+	if !options.Status {
+		return f.services, nil
+	}
+	out := client.ServiceListResult{Items: make([]swarm.Service, 0, len(f.services.Items))}
+	for _, service := range f.services.Items {
+		desiredCount, _ := desiredTasks(service)
+		var running uint64
+		for _, task := range f.tasks {
+			if task.ServiceID == service.ID && task.DesiredState == swarm.TaskStateRunning && task.Status.State == swarm.TaskStateRunning {
+				running++
+			}
+		}
+		service.ServiceStatus = &swarm.ServiceStatus{RunningTasks: running, DesiredTasks: desiredCount}
+		out.Items = append(out.Items, service)
+	}
+	return out, nil
+}
+
+func (f *fakeAPI) TaskList(_ context.Context, options client.TaskListOptions) (client.TaskListResult, error) {
+	if f.onTaskList != nil {
+		f.onTaskList()
+	}
+	if f.err != nil {
+		return client.TaskListResult{}, f.err
+	}
+	var out client.TaskListResult
+	for _, task := range f.tasks {
+		if !filterHas(options.Filters, "service", task.ServiceID) {
+			continue
+		}
+		if !filterHas(options.Filters, "desired-state", string(task.DesiredState)) {
+			continue
+		}
+		out.Items = append(out.Items, task)
+	}
+	return out, nil
+}
+
+// filterHas reports whether the filter lets value through: a missing key
+// matches everything.
+func filterHas(filters client.Filters, key, value string) bool {
+	values, ok := filters[key]
+	return !ok || values[value]
+}
+
+func (f *fakeAPI) ServiceInspect(_ context.Context, name string, _ client.ServiceInspectOptions) (client.ServiceInspectResult, error) {
+	if f.err != nil {
+		return client.ServiceInspectResult{}, f.err
+	}
+	for _, service := range f.services.Items {
+		if service.Spec.Name == name {
+			return client.ServiceInspectResult{Service: service}, nil
+		}
+	}
+	return client.ServiceInspectResult{}, fmt.Errorf("service %s not found", name)
+}
+
+// ServiceCreate stores the service with version 1 and starts its tasks.
+func (f *fakeAPI) ServiceCreate(_ context.Context, options client.ServiceCreateOptions) (client.ServiceCreateResult, error) {
+	name := options.Spec.Name
+	f.calls = append(f.calls, "ServiceCreate:"+name)
+	if f.err != nil {
+		return client.ServiceCreateResult{}, f.err
+	}
+	service := swarm.Service{ID: "id-" + name, Meta: swarm.Meta{Version: swarm.Version{Index: 1}}, Spec: options.Spec}
+	f.services.Items = append(f.services.Items, service)
+	f.startTasks(service)
+	return client.ServiceCreateResult{ID: service.ID}, nil
+}
+
+// ServiceUpdate mirrors Docker: the version must match the stored service. The
+// update pauses when a new task fails, and completes otherwise.
+func (f *fakeAPI) ServiceUpdate(_ context.Context, id string, options client.ServiceUpdateOptions) (client.ServiceUpdateResult, error) {
+	f.calls = append(f.calls, "ServiceUpdate:"+id)
+	if f.err != nil {
+		return client.ServiceUpdateResult{}, f.err
+	}
+	for i, service := range f.services.Items {
+		if service.ID != id {
+			continue
+		}
+		if options.Version.Index != service.Version.Index {
+			return client.ServiceUpdateResult{}, fmt.Errorf("service %s: version %d is out of date (have %d)",
+				service.Spec.Name, options.Version.Index, service.Version.Index)
+		}
+		service.Spec = options.Spec
+		service.Version.Index++
+		f.services.Items[i] = service
+		f.startTasks(service)
+		return client.ServiceUpdateResult{}, nil
+	}
+	return client.ServiceUpdateResult{}, fmt.Errorf("service %s not found", id)
+}
+
+// ServiceRemove removes the service and its tasks.
+func (f *fakeAPI) ServiceRemove(_ context.Context, id string, _ client.ServiceRemoveOptions) (client.ServiceRemoveResult, error) {
+	f.calls = append(f.calls, "ServiceRemove:"+id)
+	if f.err != nil {
+		return client.ServiceRemoveResult{}, f.err
+	}
+	f.services.Items = slices.DeleteFunc(f.services.Items, func(s swarm.Service) bool { return s.ID == id })
+	f.tasks = slices.DeleteFunc(f.tasks, func(t swarm.Task) bool { return t.ServiceID == id })
+	return client.ServiceRemoveResult{}, nil
+}
+
+// startTasks replaces the tasks of service with the ones tasksFor describes and
+// sets the update state the way Swarm would.
+func (f *fakeAPI) startTasks(service swarm.Service) {
+	f.tasks = slices.DeleteFunc(f.tasks, func(t swarm.Task) bool { return t.ServiceID == service.ID })
+	tasks := f.defaultTasks(service)
+	if f.tasksFor != nil {
+		tasks = f.tasksFor(service)
+	}
+	f.tasks = append(f.tasks, tasks...)
+
+	for i, item := range f.services.Items {
+		if item.ID != service.ID {
+			continue
+		}
+		item.UpdateStatus = &swarm.UpdateStatus{State: swarm.UpdateStateCompleted}
+		for _, task := range tasks {
+			if task.Status.State == swarm.TaskStateFailed {
+				item.UpdateStatus = &swarm.UpdateStatus{State: swarm.UpdateStatePaused, Message: "task failed"}
+			}
+		}
+		f.services.Items[i] = item
+	}
+}
+
+// defaultTasks runs every desired task.
+func (f *fakeAPI) defaultTasks(service swarm.Service) []swarm.Task {
+	count, _ := desiredTasks(service)
+	tasks := make([]swarm.Task, 0, count)
+	for i := range count {
+		tasks = append(tasks, swarm.Task{
+			ID:           fmt.Sprintf("%s-task-%d", service.ID, i),
+			ServiceID:    service.ID,
+			DesiredState: swarm.TaskStateRunning,
+			Status:       swarm.TaskStatus{State: swarm.TaskStateRunning},
+			Spec:         service.Spec.TaskTemplate,
+		})
+	}
+	return tasks
+}
+
+// pendingTasks is a task list in which every task waits for a node.
+func pendingTasks(service swarm.Service) []swarm.Task {
+	return []swarm.Task{{
+		ID:           service.ID + "-task-0",
+		ServiceID:    service.ID,
+		DesiredState: swarm.TaskStateRunning,
+		Status:       swarm.TaskStatus{State: swarm.TaskStatePending},
+		Spec:         service.Spec.TaskTemplate,
+	}}
+}
+
+// failedTasks is a task list in which every task of the service failed.
+func failedTasks(message string) func(swarm.Service) []swarm.Task {
+	return func(service swarm.Service) []swarm.Task {
+		return []swarm.Task{{
+			ID:           service.ID + "-task-0",
+			ServiceID:    service.ID,
+			DesiredState: swarm.TaskStateRunning,
+			Status:       swarm.TaskStatus{State: swarm.TaskStateFailed, Err: message},
+			Spec:         service.Spec.TaskTemplate,
+		}}
+	}
 }
 
 func (f *fakeAPI) NetworkList(context.Context, client.NetworkListOptions) (client.NetworkListResult, error) {
@@ -52,6 +232,18 @@ func (f *fakeAPI) ConfigInspect(_ context.Context, name string, _ client.ConfigI
 
 func (f *fakeAPI) SecretList(context.Context, client.SecretListOptions) (client.SecretListResult, error) {
 	return f.secrets, f.err
+}
+
+func (f *fakeAPI) SecretInspect(_ context.Context, name string, _ client.SecretInspectOptions) (client.SecretInspectResult, error) {
+	if f.err != nil {
+		return client.SecretInspectResult{}, f.err
+	}
+	for _, secret := range f.secrets.Items {
+		if secret.Spec.Name == name {
+			return client.SecretInspectResult{Secret: secret}, nil
+		}
+	}
+	return client.SecretInspectResult{}, fmt.Errorf("secret %s not found", name)
 }
 
 func (f *fakeAPI) VolumeList(context.Context, client.VolumeListOptions) (client.VolumeListResult, error) {

@@ -24,44 +24,83 @@ func TestInspectAPIIsReadOnly(t *testing.T) {
 	}
 }
 
-// TestWriteAPIIsCreateOrRemove keeps the mutating surface to the calls Apply
-// and Prune are allowed to make.
-//
-// ConfigUpdate is the only update method on purpose. It is allowed because it
-// changes only labels: config data is immutable in Docker, and a content change
-// gets a new name instead. Secrets, networks and volumes must not get an update
-// method; a new update method on writeAPI must be added to the list below
-// deliberately, and this test fails until it is.
-//
-// writeAPI has no read methods: the version read by ConfigInspect comes from
-// configReader, so any method that is not Create, Remove or Update fails here.
-func TestWriteAPIIsCreateOrRemove(t *testing.T) {
+// writeAllowlist is every mutating call the runtime may make, with the reason.
+// TestWriteAPIIsAllowlisted fails for a writeAPI method that is not listed here,
+// so a new write needs a deliberate entry and a reason, and a removed method
+// must leave the list too.
+var writeAllowlist = map[string]string{
+	"NetworkCreate": "Apply creates the networks of the plan",
+	"NetworkRemove": "Prune removes managed networks that no service uses",
+	"ConfigCreate":  "Apply creates the configs of the plan; a content change is a new name",
+	"ConfigUpdate":  "changes labels only: Docker fixes a config's data, and the diff never asks for a data change",
+	"ConfigRemove":  "Prune removes managed configs that no service uses",
+	"SecretCreate":  "reserved: v0 has only external secrets, and preflight refuses a managed one before this call",
+	"SecretRemove":  "Prune removes managed secrets that no service uses",
+	"ServiceCreate": "Apply creates the services of the plan",
+	"ServiceUpdate": "Apply replaces the spec of an existing service; the version comes from ServiceInspect at Apply time",
+	"VolumeCreate":  "Apply creates the volumes of the plan",
+	"VolumeRemove":  "reserved: volumes hold data and Prune never removes them",
+}
+
+// TestWriteAPIIsAllowlisted keeps the mutating surface to the calls listed in
+// writeAllowlist.
+func TestWriteAPIIsAllowlisted(t *testing.T) {
+	typ := reflect.TypeOf((*writeAPI)(nil)).Elem()
+	seen := make(map[string]bool, typ.NumMethod())
+	for i := 0; i < typ.NumMethod(); i++ {
+		name := typ.Method(i).Name
+		seen[name] = true
+		reason, ok := writeAllowlist[name]
+		if !ok {
+			t.Errorf("writeAPI method %q is not in writeAllowlist; list it with a reason or do not add it", name)
+		} else if reason == "" {
+			t.Errorf("writeAllowlist entry %q has no reason", name)
+		}
+	}
+	for name := range writeAllowlist {
+		if !seen[name] {
+			t.Errorf("writeAllowlist entry %q is not a writeAPI method", name)
+		}
+	}
+}
+
+// TestWriteAPIUpdatesAreDeliberate pins the update methods. Only the config
+// labels and the service spec may change in place; a network, a volume or a
+// secret must not get an update method.
+func TestWriteAPIUpdatesAreDeliberate(t *testing.T) {
 	typ := reflect.TypeOf((*writeAPI)(nil)).Elem()
 	var updates []string
 	for i := 0; i < typ.NumMethod(); i++ {
-		name := typ.Method(i).Name
-		switch {
-		case strings.HasSuffix(name, "Create"), strings.HasSuffix(name, "Remove"):
-		case strings.HasSuffix(name, "Update"):
+		if name := typ.Method(i).Name; strings.HasSuffix(name, "Update") {
 			updates = append(updates, name)
-		default:
-			t.Errorf("writeAPI method %q is not a create, remove or update call", name)
 		}
 	}
-	if want := []string{"ConfigUpdate"}; !slices.Equal(updates, want) {
+	slices.Sort(updates)
+	if want := []string{"ConfigUpdate", "ServiceUpdate"}; !slices.Equal(updates, want) {
 		t.Errorf("writeAPI updates = %v, want exactly %v", updates, want)
 	}
 }
 
-// TestConfigReaderIsConfigInspectOnly keeps the version read used by
-// ConfigUpdate to a single call, so it cannot grow into a write path.
-func TestConfigReaderIsConfigInspectOnly(t *testing.T) {
-	typ := reflect.TypeOf((*configReader)(nil)).Elem()
-	var names []string
-	for i := 0; i < typ.NumMethod(); i++ {
-		names = append(names, typ.Method(i).Name)
+// TestVersionReadersAreInspectOnly keeps each read used by an update or a
+// removal to a single call, so none of them can grow into a write path.
+func TestVersionReadersAreInspectOnly(t *testing.T) {
+	readers := map[string]reflect.Type{
+		"configReader":  reflect.TypeOf((*configReader)(nil)).Elem(),
+		"serviceReader": reflect.TypeOf((*serviceReader)(nil)).Elem(),
+		"secretReader":  reflect.TypeOf((*secretReader)(nil)).Elem(),
 	}
-	if want := []string{"ConfigInspect"}; !slices.Equal(names, want) {
-		t.Errorf("configReader methods = %v, want exactly %v", names, want)
+	want := map[string][]string{
+		"configReader":  {"ConfigInspect"},
+		"serviceReader": {"ServiceInspect"},
+		"secretReader":  {"SecretInspect"},
+	}
+	for name, typ := range readers {
+		var names []string
+		for i := 0; i < typ.NumMethod(); i++ {
+			names = append(names, typ.Method(i).Name)
+		}
+		if !slices.Equal(names, want[name]) {
+			t.Errorf("%s methods = %v, want exactly %v", name, names, want[name])
+		}
 	}
 }

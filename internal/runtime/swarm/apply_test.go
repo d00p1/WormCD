@@ -194,22 +194,6 @@ func TestApplyIsNoopWhenInSync(t *testing.T) {
 	}
 }
 
-func TestApplyRejectsServiceChangesBeforeMutating(t *testing.T) {
-	fake := &fakeAPI{}
-	plan := testPlan(testDesired(),
-		create(desired.KindNetwork, testNetwork),
-		create(desired.KindService, "wormcd_web_prod_web"),
-	)
-
-	_, err := newRuntime(fake).Apply(context.Background(), plan)
-	if err == nil || !strings.Contains(err.Error(), "#18") {
-		t.Fatalf("error = %v, want a not-implemented error for services", err)
-	}
-	if len(fake.calls) != 0 {
-		t.Fatalf("calls = %v, want none: the plan must be rejected before any change", fake.calls)
-	}
-}
-
 func TestApplyRejectsImmutableUpdates(t *testing.T) {
 	tests := []struct {
 		name  string
