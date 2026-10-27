@@ -63,6 +63,7 @@ type writeAPI interface {
 	SecretRemove(context.Context, string, client.SecretRemoveOptions) (client.SecretRemoveResult, error)
 	ServiceCreate(context.Context, client.ServiceCreateOptions) (client.ServiceCreateResult, error)
 	ServiceUpdate(context.Context, string, client.ServiceUpdateOptions) (client.ServiceUpdateResult, error)
+	ServiceRemove(context.Context, string, client.ServiceRemoveOptions) (client.ServiceRemoveResult, error)
 	VolumeCreate(context.Context, client.VolumeCreateOptions) (client.VolumeCreateResult, error)
 	VolumeRemove(context.Context, string, client.VolumeRemoveOptions) (client.VolumeRemoveResult, error)
 }

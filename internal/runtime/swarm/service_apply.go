@@ -3,6 +3,7 @@ package swarm
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/d00p1/wormcd/internal/desired"
 	"github.com/d00p1/wormcd/internal/runtime"
@@ -76,6 +77,27 @@ func (r *Runtime) serviceSpecFor(ctx context.Context, scope runtime.Scope, servi
 		ids.Secrets[ref.Source] = inspected.Secret.ID
 	}
 	return serviceSpec(service, scope, ids)
+}
+
+// deleteServices removes the services whose plan entry is Delete. Each one is
+// checked for ownership before it is removed.
+func (r *Runtime) deleteServices(ctx context.Context, result *runtime.Result, scope runtime.Scope, entries []runtime.Entry) error {
+	prefix := string(desired.KindService) + "/"
+	for _, entry := range entries {
+		name, ok := strings.CutPrefix(entry.Key, prefix)
+		if !ok || entry.Action != runtime.Delete {
+			continue
+		}
+		current, err := r.inspectOwnedService(ctx, scope, name)
+		if err != nil {
+			return err
+		}
+		if _, err := r.api.ServiceRemove(ctx, current.ID, client.ServiceRemoveOptions{}); err != nil {
+			return fmt.Errorf("remove service %s: %w", name, err)
+		}
+		result.Deleted = append(result.Deleted, entry.Key)
+	}
+	return nil
 }
 
 // inspectOwnedService reads a service by name and refuses one that scope does not

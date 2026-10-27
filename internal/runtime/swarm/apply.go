@@ -15,10 +15,11 @@ import (
 // Apply creates the networks, configs, secrets, volumes and services that a
 // plan asks for, in that order, and updates the services and configs in place.
 // Services are created or updated only after their networks, configs, secrets
-// and volumes exist. Service deletions run before the service creates and
-// updates, and every object that is only referenced by an old service is left
-// to Prune, which runs after the services have moved off it. A service is
-// reported as converged only once it runs its desired tasks (see converge.go).
+// and volumes exist. The services a plan deletes are removed before the other
+// service changes. Configs, secrets and networks that an old service still
+// referenced are left to Prune, which runs after the services have moved off
+// them. A service is reported as converged only once it runs its desired tasks
+// (see converge.go).
 //
 // Configs change in place only by their labels, through ConfigUpdate: Docker
 // fixes a config's data, so a content change arrives as a new name (the hash is
@@ -63,6 +64,9 @@ func (r *Runtime) Apply(ctx context.Context, plan runtime.Plan) (runtime.Result,
 	if err := applyObjects(ctx, &result, entries, desired.KindVolume, desiredState.Volumes,
 		func(v desired.Volume) string { return v.Name },
 		r.createVolume(scope), nil); err != nil {
+		return result, err
+	}
+	if err := r.deleteServices(ctx, &result, scope, plan.Entries); err != nil {
 		return result, err
 	}
 	if err := applyObjects(ctx, &result, entries, desired.KindService, desiredState.Services,

@@ -15,7 +15,8 @@ import (
 )
 
 // Prune removes the managed networks, configs and secrets of scope that are not
-// in keep. It never removes volumes: they hold data, so an unwanted volume is
+// in keep. It runs after Apply, when the services have moved to the new
+// objects. It never removes volumes: they hold data, so an unwanted volume is
 // reported as skipped and must be removed by a person.
 //
 // An object that a service in the cluster still references is also skipped,
@@ -23,8 +24,9 @@ import (
 // service has moved to the new revision. Every skipped object is listed in the
 // result with its reason.
 //
-// Services are not pruned yet (see #18); a service of scope that is not in keep
-// is reported as an error instead of being left behind silently.
+// Services are not removed here: Apply removes the services its plan deletes
+// (see apply.go). A service of scope that is not in keep and is still present
+// was therefore not removed by Apply; it is reported as skipped, not removed.
 func (r *Runtime) Prune(ctx context.Context, scope runtime.Scope, keep runtime.Set) (runtime.PruneResult, error) {
 	var result runtime.PruneResult
 	if err := validateScope(scope); err != nil {
@@ -36,9 +38,11 @@ func (r *Runtime) Prune(ctx context.Context, scope runtime.Scope, keep runtime.S
 		return result, fmt.Errorf("list services: %w", err)
 	}
 	for _, item := range filterByScope(services.Items, func(s swarm.Service) map[string]string { return s.Spec.Labels }, scope) {
-		if !keep.Has(desired.KindService, item.Spec.Name) {
-			return result, fmt.Errorf("service %s: pruning services is not implemented yet (see #18)", item.Spec.Name)
+		if keep.Has(desired.KindService, item.Spec.Name) {
+			continue
 		}
+		key := desired.Key{Kind: desired.KindService, Name: item.Spec.Name}.String()
+		result.Skipped = append(result.Skipped, runtime.Skip{Key: key, Reason: "not in the desired state; Apply removes services"})
 	}
 	referenced := serviceReferences(services.Items)
 

@@ -293,3 +293,98 @@ func TestApplyRejectsServiceMissingFromPlan(t *testing.T) {
 		t.Fatalf("calls = %v, want none", fake.calls)
 	}
 }
+
+func deleteEntry(kind desired.Kind, name string) runtime.Entry {
+	return runtime.Entry{Key: desired.Key{Kind: kind, Name: name}.String(), Action: runtime.Delete}
+}
+
+func TestApplyDeletesOwnedService(t *testing.T) {
+	existing := runningService("web:v1")
+	fake := clusterWithService(&existing)
+	plan := completePlan(testDesired(), deleteEntry(desired.KindService, testService))
+
+	result, err := newRuntime(fake).Apply(context.Background(), plan)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if want := []string{"ServiceRemove:" + existing.ID}; !slices.Equal(fake.calls, want) {
+		t.Fatalf("calls = %v, want %v", fake.calls, want)
+	}
+	if want := []string{serviceKey()}; !slices.Equal(result.Deleted, want) {
+		t.Fatalf("deleted = %v, want %v", result.Deleted, want)
+	}
+	if len(fake.services.Items) != 0 {
+		t.Fatalf("services = %d, want the service removed", len(fake.services.Items))
+	}
+}
+
+func TestApplyRefusesToDeleteForeignService(t *testing.T) {
+	foreign := runningService("web:v1")
+	foreign.Spec.Labels = nil
+	fake := clusterWithService(&foreign)
+	plan := completePlan(testDesired(), deleteEntry(desired.KindService, testService))
+
+	_, err := newRuntime(fake).Apply(context.Background(), plan)
+	if err == nil || !strings.Contains(err.Error(), "not owned by web/prod") {
+		t.Fatalf("error = %v, want an ownership error", err)
+	}
+	if slices.ContainsFunc(fake.calls, func(call string) bool { return strings.HasPrefix(call, "ServiceRemove") }) {
+		t.Fatalf("calls = %v, want no removal of a foreign service", fake.calls)
+	}
+}
+
+// TestApplyRemovesOldServiceBeforeCreatingNewOne frees the old service first, so
+// a new service can take its ports or name space.
+func TestApplyRemovesOldServiceBeforeCreatingNewOne(t *testing.T) {
+	const newService = "wormcd_web_prod_api"
+	existing := runningService("web:v1")
+	fake := clusterWithService(&existing)
+	desiredState := withService(testDesired(), "api:v1")
+	desiredState.Services[0].Name = newService
+	plan := completePlan(desiredState,
+		create(desired.KindService, newService),
+		deleteEntry(desired.KindService, testService),
+	)
+
+	if _, err := newRuntime(fake).Apply(context.Background(), plan); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	removed := slices.Index(fake.calls, "ServiceRemove:"+existing.ID)
+	created := slices.Index(fake.calls, "ServiceCreate:"+newService)
+	if removed < 0 || created < 0 || removed > created {
+		t.Fatalf("calls = %v, want the removal before the create", fake.calls)
+	}
+}
+
+// TestApplyThenPruneRemovesReplacedConfig checks the order across Apply and
+// Prune: the service moves to the new config during Apply, and only then does
+// Prune remove the old one, which no service references any more.
+func TestApplyThenPruneRemovesReplacedConfig(t *testing.T) {
+	existing := runningService("web:v1")
+	existing.Spec.TaskTemplate.ContainerSpec.Configs = []*swarm.ConfigReference{{
+		ConfigID:   "id-" + testOldConfig,
+		ConfigName: testOldConfig,
+		File:       &swarm.ConfigReferenceFileTarget{Name: "/etc/nginx/nginx.conf", Mode: 0o444},
+	}}
+	fake := clusterWithService(&existing)
+	fake.configs.Items = append(fake.configs.Items,
+		swarm.Config{ID: "id-" + testOldConfig, Spec: swarm.ConfigSpec{Annotations: swarm.Annotations{Name: testOldConfig, Labels: desired.Labels("web", "prod")}}},
+	)
+	plan := completePlan(withService(testDesired(), "web:v1"),
+		updateEntry("configs"),
+		deleteEntry(desired.KindConfig, testOldConfig),
+	)
+
+	if _, err := newRuntime(fake).Apply(context.Background(), plan); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if _, err := newRuntime(fake).Prune(context.Background(), runtime.Scope{Application: "web", Target: "prod"}, testKeep()); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+
+	update := slices.Index(fake.calls, "ServiceUpdate:"+existing.ID)
+	remove := slices.Index(fake.calls, "ConfigRemove:id-"+testOldConfig)
+	if update < 0 || remove < 0 || update > remove {
+		t.Fatalf("calls = %v, want the service update before the old config is removed", fake.calls)
+	}
+}

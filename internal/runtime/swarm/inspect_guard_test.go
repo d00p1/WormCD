@@ -38,6 +38,7 @@ var writeAllowlist = map[string]string{
 	"SecretRemove":  "Prune removes managed secrets that no service uses",
 	"ServiceCreate": "Apply creates the services of the plan",
 	"ServiceUpdate": "Apply replaces the spec of an existing service; the version comes from ServiceInspect at Apply time",
+	"ServiceRemove": "Apply removes a service whose plan entry is Delete, after checking that it belongs to the target",
 	"VolumeCreate":  "Apply creates the volumes of the plan",
 	"VolumeRemove":  "reserved: volumes hold data and Prune never removes them",
 }
