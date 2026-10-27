@@ -36,12 +36,21 @@ func (r *Runtime) waitConverged(ctx context.Context, name string, after uint64) 
 			return fmt.Errorf("service %s: not found after apply", name)
 		}
 		status := statuses[0]
+		// An update Docker paused or rolled back ends the wait even if the
+		// tasks run: a rollback runs the previous spec, which can look current.
+		// Only an update that this Apply started counts, so a stale state from
+		// an earlier revision is not reported.
+		if status.Version > after {
+			if reason := status.updateFailure(); reason != "" {
+				return fmt.Errorf("service %s: %s", name, strings.Join(append([]string{reason}, status.Failures...), "; "))
+			}
+		}
 		pending = status.pending(after)
 		if pending == "" {
 			return nil
 		}
-		if failures := status.failures(); len(failures) > 0 {
-			return fmt.Errorf("service %s: %s", name, strings.Join(failures, "; "))
+		if len(status.Failures) > 0 {
+			return fmt.Errorf("service %s: %s", name, strings.Join(status.Failures, "; "))
 		}
 
 		select {

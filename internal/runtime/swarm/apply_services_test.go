@@ -187,8 +187,8 @@ func TestApplyFailsWhenUpdatePausesOnBrokenImage(t *testing.T) {
 	r.converge = fastConvergence
 
 	_, err := r.Apply(context.Background(), plan)
-	if err == nil || !strings.Contains(err.Error(), "pull access denied for web:broken") {
-		t.Fatalf("error = %v, want the failed task of the new revision", err)
+	if err == nil || !strings.Contains(err.Error(), "update paused") || !strings.Contains(err.Error(), "pull access denied for web:broken") {
+		t.Fatalf("error = %v, want the paused update and the failed task of the new revision", err)
 	}
 	statuses, err := r.serviceStatuses(context.Background(), nil, func(swarm.Service) bool { return true })
 	if err != nil {
@@ -529,5 +529,52 @@ func TestApplyDeleteRaceOnRemoveSucceeds(t *testing.T) {
 	}
 	if len(result.Deleted) != 0 {
 		t.Fatalf("deleted = %v, want none: this Apply did not remove it", result.Deleted)
+	}
+}
+
+// TestApplyFailsWhenUpdateDoesNotComplete: Docker can end an update without
+// completing it, even when the new tasks run. A rollback runs the previous spec,
+// which can look current, so the wait must fail on the update state.
+func TestApplyFailsWhenUpdateDoesNotComplete(t *testing.T) {
+	cases := []struct {
+		name  string
+		state swarm.UpdateState
+		want  string
+	}{
+		{"paused", swarm.UpdateStatePaused, "update paused"},
+		{"rolled back", swarm.UpdateStateRollbackCompleted, "update rolled back"},
+		{"rollback paused", swarm.UpdateStateRollbackPaused, "update rollback paused"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			existing := runningService("web:v1")
+			fake := clusterWithService(&existing)
+			fake.finishedAs = tc.state
+			plan := completePlan(withService(testDesired(), "web:v2"), updateEntry("image"))
+			r := newRuntime(fake)
+			r.converge = fastConvergence
+
+			_, err := r.Apply(context.Background(), plan)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestApplyFailsWhenFailedUpdateIsRolledBack: a failed new task rolls the update
+// back; Apply reports the rollback and the task error.
+func TestApplyFailsWhenFailedUpdateIsRolledBack(t *testing.T) {
+	existing := runningService("web:v1")
+	fake := clusterWithService(&existing)
+	fake.tasksFor = failedTasks("pull access denied for web:broken")
+	fake.rollBackOnFailure = true
+	plan := completePlan(withService(testDesired(), "web:broken"), updateEntry("image"))
+	r := newRuntime(fake)
+	r.converge = fastConvergence
+
+	_, err := r.Apply(context.Background(), plan)
+	if err == nil || !strings.Contains(err.Error(), "update rolled back") || !strings.Contains(err.Error(), "pull access denied") {
+		t.Fatalf("error = %v, want the rollback and the task error", err)
 	}
 }

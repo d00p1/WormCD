@@ -38,7 +38,14 @@ type fakeAPI struct {
 	// vanishOnRemove makes ServiceRemove report NotFound without removing
 	// anything, as if another client removed the service first.
 	vanishOnRemove bool
-	err            error
+	// rollBackOnFailure makes a failed new task roll the update back, instead of
+	// pausing it.
+	rollBackOnFailure bool
+	// finishedAs is the state an update ends in once its new tasks run. It is
+	// completed by default; a test sets a rollback or a pause to model Docker
+	// ending the update that way.
+	finishedAs swarm.UpdateState
+	err        error
 
 	calls []string
 }
@@ -194,14 +201,18 @@ func (f *fakeAPI) settle() {
 				continue
 			}
 			switch {
-			case task.Status.State == swarm.TaskStateFailed || task.Status.State == swarm.TaskStateRejected:
+			case isFailed(task.Status.State):
 				failed = true
 			case task.DesiredState == swarm.TaskStateRunning && task.Status.State == swarm.TaskStateRunning:
 				running++
 			}
 		}
 		if failed {
-			service.UpdateStatus = &swarm.UpdateStatus{State: swarm.UpdateStatePaused, Message: "task failed"}
+			state := swarm.UpdateStatePaused
+			if f.rollBackOnFailure {
+				state = swarm.UpdateStateRollbackCompleted
+			}
+			service.UpdateStatus = &swarm.UpdateStatus{State: state, Message: "task failed"}
 			f.services.Items[i] = service
 			continue
 		}
@@ -214,7 +225,11 @@ func (f *fakeAPI) settle() {
 				f.tasks[j].Status.State = swarm.TaskStateShutdown
 			}
 		}
-		service.UpdateStatus = &swarm.UpdateStatus{State: swarm.UpdateStateCompleted}
+		finished := f.finishedAs
+		if finished == "" {
+			finished = swarm.UpdateStateCompleted
+		}
+		service.UpdateStatus = &swarm.UpdateStatus{State: finished}
 		f.services.Items[i] = service
 	}
 }

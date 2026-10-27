@@ -48,15 +48,17 @@ func (s serviceStatus) pending(after uint64) string {
 	if s.Version <= after {
 		return "update not applied yet"
 	}
-	return s.progress()
+	return s.blocker()
 }
 
-// progress says what keeps the service from its desired state, or is empty when
-// nothing does. A failed update is not progress: failures reports it.
-func (s serviceStatus) progress() string {
+// blocker says what keeps the service from its desired state right now, or is
+// empty when nothing does. An update that Docker paused or rolled back is not a
+// blocker: updateFailure reports it.
+func (s serviceStatus) blocker() string {
+	if reason := s.shortfall(); reason != "" {
+		return reason
+	}
 	switch {
-	case s.shortfall() != "":
-		return s.shortfall()
 	case s.Starting > 0:
 		return fmt.Sprintf("%d tasks starting", s.Starting)
 	case s.Update == swarm.UpdateStateUpdating:
@@ -65,22 +67,33 @@ func (s serviceStatus) progress() string {
 	return ""
 }
 
-// failures lists the update and task errors that stop a service from
-// converging, and that Health reports.
-func (s serviceStatus) failures() []string {
-	var out []string
+// updateFailure says why Docker stopped the update, or is empty when it did not.
+// A paused update waits for a person; a rolled-back one runs the previous spec.
+func (s serviceStatus) updateFailure() string {
+	var what string
 	switch s.Update {
-	case swarm.UpdateStatePaused, swarm.UpdateStateRollbackStarted,
-		swarm.UpdateStateRollbackPaused, swarm.UpdateStateRollbackCompleted:
-		out = append(out, "update "+string(s.Update)+detail(s.UpdateMessage))
+	case swarm.UpdateStatePaused:
+		what = "update paused"
+	case swarm.UpdateStateRollbackStarted:
+		what = "update rolling back"
+	case swarm.UpdateStateRollbackPaused:
+		what = "update rollback paused"
+	case swarm.UpdateStateRollbackCompleted:
+		what = "update rolled back"
+	default:
+		return ""
 	}
-	return append(out, s.Failures...)
+	return what + detail(s.UpdateMessage)
 }
 
 // problems lists why the service is not healthy right now.
 func (s serviceStatus) problems() []string {
-	out := s.failures()
-	if reason := s.progress(); reason != "" {
+	var out []string
+	if reason := s.updateFailure(); reason != "" {
+		out = append(out, reason)
+	}
+	out = append(out, s.Failures...)
+	if reason := s.blocker(); reason != "" {
 		out = append(out, reason)
 	}
 	return out
@@ -156,7 +169,7 @@ func statusOf(service swarm.Service, tasks []swarm.Task) serviceStatus {
 			continue
 		}
 		switch {
-		case task.Status.State == swarm.TaskStateFailed || task.Status.State == swarm.TaskStateRejected:
+		case isFailed(task.Status.State):
 			status.Failures = append(status.Failures, taskFailure(task))
 		case task.DesiredState != swarm.TaskStateRunning:
 		case task.Status.State == swarm.TaskStateRunning:
@@ -182,6 +195,12 @@ func desiredTasks(service swarm.Service) (uint64, bool) {
 		return desired.DefaultReplicas, true
 	}
 	return 0, false
+}
+
+// isFailed reports whether a task ended in an error. Swarm reports a task that
+// cannot be started as rejected.
+func isFailed(state swarm.TaskState) bool {
+	return state == swarm.TaskStateFailed || state == swarm.TaskStateRejected
 }
 
 func taskFailure(task swarm.Task) string {

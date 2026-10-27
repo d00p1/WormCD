@@ -171,20 +171,29 @@ func preflightServices(desiredState desired.Desired, entries map[string]runtime.
 // validateService runs the checks of serviceSpec that need no Docker IDs, and
 // checks that every reference is declared in the desired state.
 func validateService(service desired.Service, desiredState desired.Desired) error {
-	if _, err := serviceMode(service); err != nil {
-		return fmt.Errorf("service %s: %w", service.Name, err)
-	}
-	if _, err := mountSpecs(service.Mounts); err != nil {
-		return fmt.Errorf("service %s: %w", service.Name, err)
-	}
 	if err := checkDeclared(service.Name, "config", service.Configs,
 		func(ref desired.ConfigRef) string { return ref.Source },
 		desiredState.Configs, func(config desired.Config) string { return config.Name }); err != nil {
 		return err
 	}
-	return checkDeclared(service.Name, "secret", service.Secrets,
+	if err := checkDeclared(service.Name, "secret", service.Secrets,
 		func(ref desired.SecretRef) string { return ref.Source },
-		desiredState.Secrets, func(secret desired.Secret) string { return secret.Name })
+		desiredState.Secrets, func(secret desired.Secret) string { return secret.Name }); err != nil {
+		return err
+	}
+	// serviceSpec is the only place that checks the mode and the mounts. Every
+	// reference is declared by now, so the object names stand in for the Docker
+	// IDs, and the conversion runs without any API call.
+	ids := referenceIDs{Configs: make(map[string]string), Secrets: make(map[string]string)}
+	for _, ref := range service.Configs {
+		ids.Configs[ref.Source] = ref.Source
+	}
+	for _, ref := range service.Secrets {
+		ids.Secrets[ref.Source] = ref.Source
+	}
+	scope := runtime.Scope{Application: desiredState.Application, Target: desiredState.Target}
+	_, err := serviceSpec(service, scope, ids)
+	return err
 }
 
 // checkDeclared fails for the first reference to an object that the desired

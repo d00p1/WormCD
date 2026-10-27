@@ -182,16 +182,16 @@ func TestHealthReturnsAPIError(t *testing.T) {
 	}
 }
 
-func TestProgressReportsUpdateInProgressOnlyWhenNothingElseIsMissing(t *testing.T) {
+func TestBlockerReportsUpdateInProgressOnlyWhenNothingElseIsMissing(t *testing.T) {
 	updating := serviceStatus{Version: 2, Desired: 1, DesiredKnown: true, Running: 1, Update: swarm.UpdateStateUpdating}
-	if got := updating.progress(); got != "update in progress" {
-		t.Fatalf("progress = %q, want an update in progress", got)
+	if got := updating.blocker(); got != "update in progress" {
+		t.Fatalf("blocker = %q, want an update in progress", got)
 	}
 	if got := updating.pending(0); got != "update in progress" {
 		t.Fatalf("pending = %q, want the update in progress", got)
 	}
-	if got := updating.failures(); len(got) != 0 {
-		t.Fatalf("failures = %v, want none for a running update", got)
+	if got := updating.problems(); len(got) != 1 || got[0] != "update in progress" {
+		t.Fatalf("problems = %v, want only the update in progress", got)
 	}
 }
 
