@@ -135,7 +135,9 @@ func (r *Runtime) Inspect(ctx context.Context, scope runtime.Scope) (runtime.Obs
 		})
 	}
 
-	observed.Sort()
+	if err := observed.Sort(); err != nil {
+		return runtime.Observed{}, fmt.Errorf("sort observed state: %w", err)
+	}
 	return observed, nil
 }
 

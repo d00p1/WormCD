@@ -233,56 +233,135 @@ type Volume struct {
 	External   bool              `json:"external,omitempty"`
 }
 
-// Sort puts every collection in a deterministic order, in place. To get the
-// canonical JSON of a state without changing it, use Canonical.
-func (d *Desired) Sort() {
-	SortServices(d.Services)
-	SortNetworks(d.Networks)
-	SortConfigs(d.Configs)
-	SortSecrets(d.Secrets)
-	SortVolumes(d.Volumes)
+// Sort puts every collection in a deterministic order, in place. If any element
+// that needs a tie-break cannot be encoded, Sort returns an error and changes
+// nothing. To get the canonical JSON of a state without changing it, use
+// Canonical.
+func (d *Desired) Sort() error {
+	services, err := planServices(d.Services)
+	if err != nil {
+		return err
+	}
+	networks, err := planSort(d.Networks, KindNetwork, func(n Network) string { return n.Name })
+	if err != nil {
+		return err
+	}
+	configs, err := planSort(d.Configs, KindConfig, func(c Config) string { return c.Name })
+	if err != nil {
+		return err
+	}
+	secrets, err := planSort(d.Secrets, KindSecret, func(s Secret) string { return s.Name })
+	if err != nil {
+		return err
+	}
+	volumes, err := planSort(d.Volumes, KindVolume, func(v Volume) string { return v.Name })
+	if err != nil {
+		return err
+	}
+	services()
+	networks()
+	configs()
+	secrets()
+	volumes()
+	return nil
 }
 
 // Every sort compares a full key, so elements that compare equal are
 // identical in their encoding and the output does not depend on input order.
 
 // SortServices orders services by name and each service's nested collections.
-func SortServices(services []Service) {
-	sortByName(services, func(s Service) string { return s.Name })
-	for i := range services {
-		services[i].sort()
+func SortServices(services []Service) error {
+	sortServices, err := planServices(services)
+	if err != nil {
+		return err
 	}
+	sortServices()
+	return nil
 }
 
 // SortNetworks orders networks by name.
-func SortNetworks(networks []Network) {
-	sortByName(networks, func(n Network) string { return n.Name })
+func SortNetworks(networks []Network) error {
+	return sortByName(networks, KindNetwork, func(n Network) string { return n.Name })
 }
 
 // SortConfigs orders configs by name.
-func SortConfigs(configs []Config) {
-	sortByName(configs, func(c Config) string { return c.Name })
+func SortConfigs(configs []Config) error {
+	return sortByName(configs, KindConfig, func(c Config) string { return c.Name })
 }
 
 // SortSecrets orders secrets by name.
-func SortSecrets(secrets []Secret) {
-	sortByName(secrets, func(s Secret) string { return s.Name })
+func SortSecrets(secrets []Secret) error {
+	return sortByName(secrets, KindSecret, func(s Secret) string { return s.Name })
 }
 
 // SortVolumes orders volumes by name.
-func SortVolumes(volumes []Volume) {
-	sortByName(volumes, func(v Volume) string { return v.Name })
+func SortVolumes(volumes []Volume) error {
+	return sortByName(volumes, KindVolume, func(v Volume) string { return v.Name })
 }
 
 // sortByName orders elems by name and breaks ties on the JSON encoding of the
-// whole element.
-func sortByName[T any](elems []T, name func(T) string) {
-	slices.SortFunc(elems, func(a, b T) int {
-		if c := strings.Compare(name(a), name(b)); c != 0 {
-			return c
+// whole element. It fails without reordering elems if a tied element cannot be
+// encoded.
+func sortByName[T any](elems []T, kind Kind, name func(T) string) error {
+	sortElems, err := planSort(elems, kind, name)
+	if err != nil {
+		return err
+	}
+	sortElems()
+	return nil
+}
+
+// planSort encodes the elements whose names are shared, the only ones the
+// tie-break compares, and returns the sort. The sort cannot fail, so callers
+// can plan several collections and only then reorder any of them.
+func planSort[T any](elems []T, kind Kind, name func(T) string) (func(), error) {
+	shared := make(map[string]int, len(elems))
+	for _, e := range elems {
+		shared[name(e)]++
+	}
+	type entry struct {
+		elem T
+		name string
+		enc  []byte
+	}
+	entries := make([]entry, len(elems))
+	for i, e := range elems {
+		n := name(e)
+		entries[i] = entry{elem: e, name: n}
+		if shared[n] > 1 {
+			enc, err := json.Marshal(e)
+			if err != nil {
+				return nil, fmt.Errorf("desired: cannot sort %s %q: %w", kind, n, err)
+			}
+			entries[i].enc = enc
 		}
-		return compareEncoded(a, b)
-	})
+	}
+	return func() {
+		slices.SortFunc(entries, func(a, b entry) int {
+			if c := strings.Compare(a.name, b.name); c != 0 {
+				return c
+			}
+			return bytes.Compare(a.enc, b.enc)
+		})
+		for i := range entries {
+			elems[i] = entries[i].elem
+		}
+	}, nil
+}
+
+// planServices is planSort for services, followed by the nested sorts of each
+// service.
+func planServices(services []Service) (func(), error) {
+	sortServices, err := planSort(services, KindService, func(s Service) string { return s.Name })
+	if err != nil {
+		return nil, err
+	}
+	return func() {
+		sortServices()
+		for i := range services {
+			services[i].sort()
+		}
+	}, nil
 }
 
 func (s *Service) sort() {
@@ -352,23 +431,6 @@ func compareBool(a, b bool) int {
 	default:
 		return 1
 	}
-}
-
-// compareEncoded orders two values by their JSON encoding. It is the last
-// tie-break for elements that agree on the sort key. An element that cannot be
-// encoded, such as one holding a NaN float, would compare equal to every other
-// such element and make the order depend on input order. That is a programmer
-// error: Canonical rejects such state before it sorts, so this panics.
-func compareEncoded(a, b any) int {
-	ja, err := json.Marshal(a)
-	if err != nil {
-		panic(fmt.Sprintf("desired: sort tie-break cannot encode %T: %v", a, err))
-	}
-	jb, err := json.Marshal(b)
-	if err != nil {
-		panic(fmt.Sprintf("desired: sort tie-break cannot encode %T: %v", b, err))
-	}
-	return bytes.Compare(ja, jb)
 }
 
 // TargetNamespace is the prefix WormCD gives to every managed runtime object

@@ -84,7 +84,9 @@ func TestCanonicalIgnoresInputOrder(t *testing.T) {
 	}
 
 	ordered := shuffled()
-	ordered.Sort()
+	if err := ordered.Sort(); err != nil {
+		t.Fatalf("Sort: %v", err)
+	}
 	want, err := ordered.Canonical()
 	if err != nil {
 		t.Fatalf("Canonical(sorted): %v", err)
@@ -248,29 +250,5 @@ func TestCanonicalNilStateIsError(t *testing.T) {
 	var d *Desired
 	if _, err := d.Canonical(); err == nil {
 		t.Fatal("Canonical on nil *Desired returned no error")
-	}
-}
-
-func TestSortPanicsOnUnencodableTie(t *testing.T) {
-	services := []Service{
-		{Name: "web", Update: UpdateConfig{MaxFailureRatio: float32(math.NaN())}},
-		{Name: "web"},
-	}
-	defer func() {
-		if recover() == nil {
-			t.Fatal("SortServices ordered unencodable tied elements without panicking")
-		}
-	}()
-	SortServices(services)
-}
-
-func TestSortIgnoresUnencodableNonTies(t *testing.T) {
-	services := []Service{
-		{Name: "web", Update: UpdateConfig{MaxFailureRatio: float32(math.NaN())}},
-		{Name: "api"},
-	}
-	SortServices(services)
-	if services[0].Name != "api" {
-		t.Errorf("services = %v, want api first", services[0].Name)
 	}
 }

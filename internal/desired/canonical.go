@@ -20,7 +20,9 @@ func (d *Desired) Canonical() ([]byte, error) {
 		return nil, err
 	}
 	c := d.clone()
-	c.Sort()
+	if err := c.Sort(); err != nil {
+		return nil, err
+	}
 	return json.Marshal(c)
 }
 
