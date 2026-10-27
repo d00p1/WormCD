@@ -27,6 +27,18 @@ type reconcileStore interface {
 	Revision(ctx context.Context, application, target string, number int64) (store.Revision, error)
 }
 
+// DefaultSyncTimeout is the deadline of one sync or rollback when Config does
+// not set one. It covers the whole run, not one cluster call: a service
+// convergence waits per service, so N services need more than one wait.
+const DefaultSyncTimeout = 30 * time.Minute
+
+// Config sets up a Service. Root is the deploy repository checkout. SyncTimeout
+// is the deadline of one sync or rollback; zero means DefaultSyncTimeout.
+type Config struct {
+	Root        string
+	SyncTimeout time.Duration
+}
+
 // finishTimeout bounds the writes that record a failed run. They ignore
 // cancellation of the run, which is often the reason for the failure, but must
 // not hang on a stuck database.
@@ -35,20 +47,25 @@ const finishTimeout = 10 * time.Second
 // Service runs sync, rollback and status for targets. Operations on one target
 // are serialized in this process (ADR-0007); different targets run in parallel.
 type Service struct {
-	store    reconcileStore
-	runtimes RuntimeFactory
-	root     string
-	locks    *locks
+	store       reconcileStore
+	runtimes    RuntimeFactory
+	root        string
+	syncTimeout time.Duration
+	locks       *locks
 }
 
-// New returns a Service. root is the deploy repository checkout that sync
-// renders manifests from.
-func New(st *store.Store, runtimes RuntimeFactory, root string) *Service {
+// New returns a Service. Sync renders manifests from cfg.Root.
+func New(st *store.Store, runtimes RuntimeFactory, cfg Config) *Service {
+	timeout := cfg.SyncTimeout
+	if timeout == 0 {
+		timeout = DefaultSyncTimeout
+	}
 	return &Service{
-		store:    st,
-		runtimes: runtimes,
-		root:     root,
-		locks:    newLocks(),
+		store:       st,
+		runtimes:    runtimes,
+		root:        cfg.Root,
+		syncTimeout: timeout,
+		locks:       newLocks(),
 	}
 }
 
@@ -122,6 +139,9 @@ func (s *Service) Status(ctx context.Context, r Ref) (store.Status, error) {
 
 // execute is the run shared by Sync and Rollback: validate, take the target
 // lock, mark the target Progressing, get the desired state and converge.
+// The deadline starts once the lock is held, so waiting for another run on the
+// same target does not use up this run's time. Waiting itself honors the
+// caller's ctx.
 func (s *Service) execute(ctx context.Context, r Ref, op operation, src source) (int64, error) {
 	if err := validateRef(r); err != nil {
 		return 0, err
@@ -131,6 +151,8 @@ func (s *Service) execute(ctx context.Context, r Ref, op operation, src source) 
 		return 0, fmt.Errorf("%s %s: %w", op.kind, r, err)
 	}
 	defer release()
+	ctx, cancel := context.WithTimeout(ctx, s.syncTimeout)
+	defer cancel()
 
 	target, err := s.store.EnsureTarget(ctx, r.Application, r.Target, "")
 	if err != nil {
@@ -234,6 +256,9 @@ func (s *Service) render(ctx context.Context, r Ref) (*desired.Desired, string, 
 // returned error carries the stage and the cause. Store errors are joined to it
 // so that a failed record is not lost.
 func (s *Service) fail(ctx context.Context, r Ref, op operation, status store.Status, stage Stage, last int64, cause error) error {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		cause = fmt.Errorf("%s deadline exceeded after %s: %w", op.kind, s.syncTimeout, cause)
+	}
 	err := fmt.Errorf("%s %s: %s: %w", op.kind, r, stage, cause)
 	// The run may have failed because ctx was canceled, so the failure is
 	// written with a context that ignores cancellation.

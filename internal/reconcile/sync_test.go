@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/d00p1/wormcd/internal/runtime"
 	"github.com/d00p1/wormcd/internal/store"
@@ -75,7 +76,7 @@ func newEnv(t *testing.T) *env {
 	e.setImage(t, imageV1)
 	e.svc = New(st, func(_ context.Context, _ string) (runtime.Runtime, error) {
 		return e.fake, nil
-	}, root)
+	}, Config{Root: root})
 	return e
 }
 
@@ -293,6 +294,27 @@ func TestSyncCanceledDuringApplyDegrades(t *testing.T) {
 	}
 }
 
+func TestSyncDeadlineExceededDuringApplyDegrades(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	e.svc.syncTimeout = 100 * time.Millisecond
+	e.fake.gates["prod"] = make(chan struct{}) // never closed: Apply ends with the deadline
+	e.fake.entered = make(chan string, 1)
+
+	_, err := e.svc.Sync(ctx, prod)
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "sync deadline exceeded") {
+		t.Fatalf("Sync err = %v, want the sync deadline error", err)
+	}
+	got := e.assertState(t, "prod", store.StatusDegraded, 0)
+	if !strings.Contains(got.Message, "sync deadline exceeded") {
+		t.Errorf("message = %q, want it to name the deadline", got.Message)
+	}
+	events := e.events(t, "prod")
+	if last := events[len(events)-1]; last.Type != EventSyncFailed || !strings.Contains(last.Payload, `"stage":"apply"`) {
+		t.Fatalf("last event = %+v, want sync.failed at apply", last)
+	}
+}
+
 // failingStore makes SetTargetState fail for one status and passes everything
 // else to the real store.
 type failingStore struct {
@@ -389,7 +411,7 @@ func TestSyncUnavailableClusterIsBlocked(t *testing.T) {
 	fake := newFakeRuntime()
 	svc := New(st, func(_ context.Context, cluster string) (runtime.Runtime, error) {
 		return nil, fmt.Errorf("cluster %s: connection refused", cluster)
-	}, root)
+	}, Config{Root: root})
 
 	if _, err := svc.Sync(ctx, prod); err == nil || !strings.Contains(err.Error(), "connection refused") {
 		t.Fatalf("Sync err = %v, want connection error", err)
