@@ -31,12 +31,7 @@ func (s *Store) AddEvent(ctx context.Context, e Event) error {
 	}
 
 	err := withTx(ctx, s.db, func(tx *sql.Tx) error {
-		var targetID int64
-		err := tx.QueryRowContext(ctx, `SELECT id FROM targets WHERE app = ? AND target = ?`,
-			e.Application, e.Target).Scan(&targetID)
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrNotFound
-		}
+		t, err := findTarget(ctx, tx, e.Application, e.Target)
 		if err != nil {
 			return err
 		}
@@ -44,7 +39,7 @@ func (s *Store) AddEvent(ctx context.Context, e Event) error {
 		var revisionID sql.NullInt64
 		if e.Revision != 0 {
 			err := tx.QueryRowContext(ctx,
-				`SELECT id FROM revisions WHERE target_id = ? AND number = ?`, targetID, e.Revision).Scan(&revisionID.Int64)
+				`SELECT id FROM revisions WHERE target_id = ? AND number = ?`, t.ID, e.Revision).Scan(&revisionID.Int64)
 			if errors.Is(err, sql.ErrNoRows) {
 				return ErrNotFound
 			}
@@ -57,7 +52,7 @@ func (s *Store) AddEvent(ctx context.Context, e Event) error {
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO events (target_id, revision_id, type, payload, created_at)
 			VALUES (?, ?, ?, ?, ?)`,
-			targetID, revisionID, e.Type, payload, now())
+			t.ID, revisionID, e.Type, payload, now())
 		return err
 	})
 	if err != nil {

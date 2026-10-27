@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 )
 
@@ -121,6 +123,130 @@ func TestEnsureTargetAndStatus(t *testing.T) {
 	}
 	if _, err := s.Target(ctx, "web", "missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Target on missing target: err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestEnsureTargetEmptyClusterKeepsExisting(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openTemp(t)
+
+	if _, err := s.EnsureTarget(ctx, "web", "prod", "c1"); err != nil {
+		t.Fatalf("EnsureTarget: %v", err)
+	}
+	got, err := s.EnsureTarget(ctx, "web", "prod", "")
+	if err != nil {
+		t.Fatalf("EnsureTarget with empty cluster: %v", err)
+	}
+	if got.Cluster != "c1" {
+		t.Fatalf("cluster = %q after empty EnsureTarget, want c1", got.Cluster)
+	}
+
+	got, err = s.EnsureTarget(ctx, "web", "prod", "c2")
+	if err != nil {
+		t.Fatalf("EnsureTarget with new cluster: %v", err)
+	}
+	if got.Cluster != "c2" {
+		t.Fatalf("cluster = %q, want c2", got.Cluster)
+	}
+}
+
+func TestConcurrentAppendRevisionAcrossStores(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "wormcd.db")
+	first, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open first: %v", err)
+	}
+	defer func() { _ = first.Close() }()
+	second, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open second: %v", err)
+	}
+	defer func() { _ = second.Close() }()
+	if _, err := first.EnsureTarget(ctx, "web", "prod", ""); err != nil {
+		t.Fatalf("EnsureTarget: %v", err)
+	}
+
+	const perStore = 20
+	var wg sync.WaitGroup
+	errs := make(chan error, 2*perStore)
+	numbers := make(chan int64, 2*perStore)
+	for _, s := range []*Store{first, second} {
+		for range perStore {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				n, err := s.AppendRevision(ctx, "web", "prod", NewRevision{Commit: "c", RenderedSpec: sampleSpec})
+				if err != nil {
+					errs <- err
+					return
+				}
+				numbers <- n
+			}()
+		}
+	}
+	wg.Wait()
+	close(errs)
+	close(numbers)
+	for err := range errs {
+		t.Errorf("AppendRevision: %v", err)
+	}
+
+	seen := make(map[int64]bool)
+	for n := range numbers {
+		if seen[n] {
+			t.Errorf("revision number %d issued twice", n)
+		}
+		seen[n] = true
+	}
+	for n := int64(1); n <= 2*perStore; n++ {
+		if !seen[n] {
+			t.Errorf("revision number %d missing", n)
+		}
+	}
+}
+
+func TestOpenAppliesConnectionPragmas(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openTemp(t)
+
+	var foreignKeys int
+	if err := s.db.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
+		t.Fatalf("foreign_keys: %v", err)
+	}
+	if foreignKeys != 1 {
+		t.Errorf("foreign_keys = %d, want 1", foreignKeys)
+	}
+	var busyTimeout int
+	if err := s.db.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&busyTimeout); err != nil {
+		t.Fatalf("busy_timeout: %v", err)
+	}
+	if busyTimeout != 5000 {
+		t.Errorf("busy_timeout = %d, want 5000", busyTimeout)
+	}
+}
+
+func TestOpenPathWithQueryCharacters(t *testing.T) {
+	ctx := context.Background()
+	dir := filepath.Join(t.TempDir(), "data?v=1#x")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	path := filepath.Join(dir, "wormcd#1?.db")
+
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if _, err := s.EnsureTarget(ctx, "web", "prod", "local"); err != nil {
+		t.Fatalf("EnsureTarget: %v", err)
+	}
+	if _, err := s.AppendRevision(ctx, "web", "prod", NewRevision{Commit: "c1", RenderedSpec: sampleSpec}); err != nil {
+		t.Fatalf("AppendRevision: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("database not created at %s: %v", path, err)
 	}
 }
 

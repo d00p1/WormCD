@@ -44,27 +44,22 @@ func (s *Store) AppendRevision(ctx context.Context, application, target string, 
 
 	var number int64
 	err = withTx(ctx, s.db, func(tx *sql.Tx) error {
-		var targetID int64
-		err := tx.QueryRowContext(ctx, `SELECT id FROM targets WHERE app = ? AND target = ?`,
-			application, target).Scan(&targetID)
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrNotFound
-		}
+		t, err := findTarget(ctx, tx, application, target)
 		if err != nil {
 			return err
 		}
 
 		if err := tx.QueryRowContext(ctx,
-			`SELECT COALESCE(MAX(number), 0) + 1 FROM revisions WHERE target_id = ?`, targetID).Scan(&number); err != nil {
+			`SELECT COALESCE(MAX(number), 0) + 1 FROM revisions WHERE target_id = ?`, t.ID).Scan(&number); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO revisions (target_id, number, "commit", rendered_spec, image_digests, created_at)
 			VALUES (?, ?, ?, ?, ?, ?)`,
-			targetID, number, rev.Commit, string(rev.RenderedSpec), string(digestsJSON), now()); err != nil {
+			t.ID, number, rev.Commit, string(rev.RenderedSpec), string(digestsJSON), now()); err != nil {
 			return err
 		}
-		_, err = tx.ExecContext(ctx, `UPDATE targets SET last_revision = ? WHERE id = ?`, number, targetID)
+		_, err = tx.ExecContext(ctx, `UPDATE targets SET last_revision = ? WHERE id = ?`, number, t.ID)
 		return err
 	})
 	if err != nil {
@@ -73,10 +68,13 @@ func (s *Store) AppendRevision(ctx context.Context, application, target string, 
 	return number, nil
 }
 
+// revisionColumns lists the columns scanRevision reads, in order.
+const revisionColumns = `r.number, r."commit", r.rendered_spec, r.image_digests, r.created_at`
+
 // Revision returns revision number of the target without contacting git.
 func (s *Store) Revision(ctx context.Context, application, target string, number int64) (Revision, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT r.number, r."commit", r.rendered_spec, r.image_digests, r.created_at
+		SELECT `+revisionColumns+`
 		FROM revisions r JOIN targets t ON t.id = r.target_id
 		WHERE t.app = ? AND t.target = ? AND r.number = ?`,
 		application, target, number)
@@ -93,7 +91,7 @@ func (s *Store) Revision(ctx context.Context, application, target string, number
 // Revisions returns all revisions of the target, newest first.
 func (s *Store) Revisions(ctx context.Context, application, target string) ([]Revision, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT r.number, r."commit", r.rendered_spec, r.image_digests, r.created_at
+		SELECT `+revisionColumns+`
 		FROM revisions r JOIN targets t ON t.id = r.target_id
 		WHERE t.app = ? AND t.target = ?
 		ORDER BY r.number DESC`,
