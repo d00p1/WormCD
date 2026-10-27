@@ -36,55 +36,46 @@ func New(st *store.Store, runtimes RuntimeFactory, root string) *Service {
 	}
 }
 
-// operation describes one sync or rollback for events and status messages.
+// opKind is the kind of a run: a sync from the checkout or a rollback to a
+// stored revision.
+type opKind string
+
+const (
+	kindSync     opKind = "sync"
+	kindRollback opKind = "rollback"
+)
+
+// operation describes one run for events, status messages and errors.
 type operation struct {
-	name      string
-	started   string
-	succeeded string
-	failed    string
-	// revision is the revision a rollback restores, 0 for sync.
+	kind      opKind
+	started   EventType
+	succeeded EventType
+	failed    EventType
+	// message describes the start of the run.
+	message string
+	// revision is the revision a rollback restores; 0 for sync.
 	revision int64
 }
+
+// source returns the desired state of the run and the cluster it targets. It
+// runs after the target is marked Progressing.
+type source func(ctx context.Context, target store.Target) (*desired.Desired, string, error)
 
 // Sync renders the target from the checkout, applies it to the cluster, prunes
 // and checks health, then records a revision. It returns the number of the new
 // revision. On failure the target's status is set to Blocked or Degraded and the
 // last successful revision stays the last one.
 func (s *Service) Sync(ctx context.Context, r Ref) (int64, error) {
-	if err := validateRef(r); err != nil {
-		return 0, err
-	}
-	release, err := s.locks.acquire(ctx, r)
-	if err != nil {
-		return 0, fmt.Errorf("sync %s: %w", r, err)
-	}
-	defer release()
-
 	op := operation{
-		name:      "sync",
+		kind:      kindSync,
 		started:   EventSyncStarted,
 		succeeded: EventSyncSucceeded,
 		failed:    EventSyncFailed,
+		message:   "sync started",
 	}
-	target, err := s.begin(ctx, r, op, "sync started")
-	if err != nil {
-		return 0, err
-	}
-
-	state, cluster, err := manifest.LoadWithCluster(ctx, manifest.Options{App: r.String(), Root: s.root})
-	if err != nil {
-		return 0, s.fail(ctx, r, op, store.StatusBlocked, "render", target.LastRevision, err)
-	}
-	target, err = s.store.EnsureTarget(ctx, r.Application, r.Target, cluster)
-	if err != nil {
-		return 0, fmt.Errorf("sync %s: %w", r, err)
-	}
-
-	rt, err := s.runtimes(ctx, cluster)
-	if err != nil {
-		return 0, s.fail(ctx, r, op, store.StatusBlocked, "runtime", target.LastRevision, err)
-	}
-	return s.converge(ctx, r, op, state, rt, target.LastRevision)
+	return s.execute(ctx, r, op, func(ctx context.Context, _ store.Target) (*desired.Desired, string, error) {
+		return s.render(ctx, r)
+	})
 }
 
 // Status reports whether the cluster matches the desired state of the target.
@@ -95,7 +86,7 @@ func (s *Service) Status(ctx context.Context, r Ref) (store.Status, error) {
 	if err := validateRef(r); err != nil {
 		return "", err
 	}
-	state, cluster, err := manifest.LoadWithCluster(ctx, manifest.Options{App: r.String(), Root: s.root})
+	state, cluster, err := s.render(ctx, r)
 	if err != nil {
 		return "", fmt.Errorf("status %s: render: %w", r, err)
 	}
@@ -103,61 +94,88 @@ func (s *Service) Status(ctx context.Context, r Ref) (store.Status, error) {
 	if err != nil {
 		return "", fmt.Errorf("status %s: runtime: %w", r, err)
 	}
-	observed, err := rt.Inspect(ctx, scopeOf(r))
+	plan, err := observe(ctx, r, state, rt)
 	if err != nil {
 		return "", fmt.Errorf("status %s: inspect: %w", r, err)
 	}
-	if Diff(state, observed).HasChanges() {
+	if plan.HasChanges() {
 		return store.StatusOutOfSync, nil
 	}
 	return store.StatusSynced, nil
 }
 
-// begin marks the target Progressing, records the start event and returns the
-// target row. The row is created on first use with an empty cluster.
-func (s *Service) begin(ctx context.Context, r Ref, op operation, message string) (store.Target, error) {
+// execute is the run shared by Sync and Rollback: validate, take the target
+// lock, mark the target Progressing, get the desired state and converge.
+func (s *Service) execute(ctx context.Context, r Ref, op operation, src source) (int64, error) {
+	if err := validateRef(r); err != nil {
+		return 0, err
+	}
+	release, err := s.locks.acquire(ctx, r)
+	if err != nil {
+		return 0, fmt.Errorf("%s %s: %w", op.kind, r, err)
+	}
+	defer release()
+
 	target, err := s.store.EnsureTarget(ctx, r.Application, r.Target, "")
 	if err != nil {
-		return store.Target{}, fmt.Errorf("%s %s: %w", op.name, r, err)
+		return 0, fmt.Errorf("%s %s: %w", op.kind, r, err)
 	}
-	if err := s.store.SetTargetState(ctx, r.Application, r.Target, store.StatusProgressing, message, target.LastRevision); err != nil {
-		return store.Target{}, fmt.Errorf("%s %s: %w", op.name, r, err)
+	if err := s.store.SetTargetState(ctx, r.Application, r.Target, store.StatusProgressing, op.message, target.LastRevision); err != nil {
+		return 0, fmt.Errorf("%s %s: %w", op.kind, r, err)
 	}
-	if err := s.event(ctx, r, op.revision, op.started, message, "", ""); err != nil {
-		return store.Target{}, fmt.Errorf("%s %s: %w", op.name, r, err)
+	if err := s.event(ctx, r, op.revision, op.started, op.message, "", ""); err != nil {
+		return 0, fmt.Errorf("%s %s: %w", op.kind, r, err)
 	}
-	return target, nil
+
+	state, cluster, err := src(ctx, target)
+	if err != nil {
+		return 0, s.fail(ctx, r, op, store.StatusBlocked, stageRender, target.LastRevision, err)
+	}
+	// The row already exists, so the cluster is written only when it changed.
+	// The cluster is known only after the manifest is rendered, so a first sync
+	// writes it here.
+	if cluster != target.Cluster {
+		target, err = s.store.EnsureTarget(ctx, r.Application, r.Target, cluster)
+		if err != nil {
+			return 0, fmt.Errorf("%s %s: %w", op.kind, r, err)
+		}
+	}
+
+	rt, err := s.runtimes(ctx, cluster)
+	if err != nil {
+		return 0, s.fail(ctx, r, op, store.StatusBlocked, stageRuntime, target.LastRevision, err)
+	}
+	return s.converge(ctx, r, op, state, rt, target.LastRevision)
 }
 
 // converge brings the cluster to state, prunes, checks health and records
 // state as the next revision. Each step stops the run at its first error.
 func (s *Service) converge(ctx context.Context, r Ref, op operation, state *desired.Desired, rt runtime.Runtime, last int64) (int64, error) {
-	scope := scopeOf(r)
-
-	observed, err := rt.Inspect(ctx, scope)
+	plan, err := observe(ctx, r, state, rt)
 	if err != nil {
-		return 0, s.fail(ctx, r, op, store.StatusBlocked, "inspect", last, err)
+		// TODO(#20 review): Blocked or Degraded for an Inspect error, and whether
+		// the cluster calls need timeouts, is decided separately. Do not change here.
+		return 0, s.fail(ctx, r, op, store.StatusBlocked, stageInspect, last, err)
 	}
-	plan := Diff(state, observed)
 	if plan.HasChanges() {
 		if _, err := rt.Apply(ctx, plan); err != nil {
-			return 0, s.fail(ctx, r, op, store.StatusDegraded, "apply", last, err)
+			return 0, s.fail(ctx, r, op, store.StatusDegraded, stageApply, last, err)
 		}
 	}
-	if _, err := rt.Prune(ctx, scope, keepSet(state)); err != nil {
-		return 0, s.fail(ctx, r, op, store.StatusDegraded, "prune", last, err)
+	if _, err := rt.Prune(ctx, scopeOf(r), keepSet(state)); err != nil {
+		return 0, s.fail(ctx, r, op, store.StatusDegraded, stagePrune, last, err)
 	}
 
-	health, err := rt.Health(ctx, scope)
+	health, err := rt.Health(ctx, scopeOf(r))
 	if err != nil {
-		return 0, s.fail(ctx, r, op, store.StatusDegraded, "health", last, err)
+		return 0, s.fail(ctx, r, op, store.StatusDegraded, stageHealth, last, err)
 	}
 	if !health.Healthy {
 		cause := "not healthy"
 		if len(health.Problems) > 0 {
 			cause += ": " + strings.Join(health.Problems, "; ")
 		}
-		return 0, s.fail(ctx, r, op, store.StatusDegraded, "health", last, errors.New(cause))
+		return 0, s.fail(ctx, r, op, store.StatusDegraded, stageHealth, last, errors.New(cause))
 	}
 
 	number, err := s.store.AppendRevision(ctx, r.Application, r.Target, store.NewRevision{
@@ -165,39 +183,55 @@ func (s *Service) converge(ctx context.Context, r Ref, op operation, state *desi
 		ImageDigests: imageDigests(state),
 	})
 	if err != nil {
-		return 0, s.fail(ctx, r, op, store.StatusDegraded, "revision", last, err)
+		return 0, s.fail(ctx, r, op, store.StatusDegraded, stageRevision, last, err)
 	}
 	if err := s.store.SetTargetState(ctx, r.Application, r.Target, store.StatusSynced, "", number); err != nil {
-		return 0, fmt.Errorf("%s %s: %w", op.name, r, err)
+		return 0, fmt.Errorf("%s %s: %w", op.kind, r, err)
 	}
 	if err := s.event(ctx, r, number, op.succeeded, op.successMessage(number), "", ""); err != nil {
-		return 0, fmt.Errorf("%s %s: %w", op.name, r, err)
+		return 0, fmt.Errorf("%s %s: %w", op.kind, r, err)
 	}
 	return number, nil
+}
+
+// observe reads the cluster for r and compares it with state. Sync and Status
+// both use it, so they report the same plan.
+func observe(ctx context.Context, r Ref, state *desired.Desired, rt runtime.Runtime) (runtime.Plan, error) {
+	observed, err := rt.Inspect(ctx, scopeOf(r))
+	if err != nil {
+		return runtime.Plan{}, err
+	}
+	return Diff(state, observed), nil
+}
+
+// render loads the desired state of r from the checkout and returns the
+// cluster the target declares.
+func (s *Service) render(ctx context.Context, r Ref) (*desired.Desired, string, error) {
+	return manifest.LoadWithCluster(ctx, manifest.Options{App: r.String(), Root: s.root})
 }
 
 // fail records a failed run: target status, message and failure event. The
 // returned error carries the stage and the cause. Store errors are joined to it
 // so that a failed record is not lost.
-func (s *Service) fail(ctx context.Context, r Ref, op operation, status store.Status, stage string, last int64, cause error) error {
-	err := fmt.Errorf("%s %s: %s: %w", op.name, r, stage, cause)
+func (s *Service) fail(ctx context.Context, r Ref, op operation, status store.Status, stage Stage, last int64, cause error) error {
+	err := fmt.Errorf("%s %s: %s: %w", op.kind, r, stage, cause)
 	setErr := s.store.SetTargetState(ctx, r.Application, r.Target, status, err.Error(), last)
-	evErr := s.event(ctx, r, op.revision, op.failed, fmt.Sprintf("%s failed at %s", op.name, stage), stage, cause.Error())
+	evErr := s.event(ctx, r, op.revision, op.failed, fmt.Sprintf("%s failed at %s", op.kind, stage), stage, cause.Error())
 	return errors.Join(err, setErr, evErr)
 }
 
-func (s *Service) event(ctx context.Context, r Ref, revision int64, typ, message, stage, cause string) error {
+func (s *Service) event(ctx context.Context, r Ref, revision int64, typ EventType, message string, stage Stage, cause string) error {
 	return s.store.AddEvent(ctx, store.Event{
 		Application: r.Application,
 		Target:      r.Target,
 		Revision:    revision,
-		Type:        typ,
+		Type:        string(typ),
 		Payload:     eventPayload{Message: message, Stage: stage, Error: cause},
 	})
 }
 
 func (op operation) successMessage(number int64) string {
-	if op.revision != 0 {
+	if op.kind == kindRollback {
 		return fmt.Sprintf("rollback to revision %d succeeded as revision %d", op.revision, number)
 	}
 	return fmt.Sprintf("sync succeeded as revision %d", number)

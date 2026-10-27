@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -101,7 +102,7 @@ func (e *env) target(t *testing.T, name string) store.Target {
 }
 
 type eventRow struct {
-	Type     string
+	Type     EventType
 	Revision int64
 	Payload  string
 }
@@ -133,8 +134,8 @@ func (e *env) events(t *testing.T, target string) []eventRow {
 	return out
 }
 
-func eventTypes(events []eventRow) []string {
-	types := make([]string, 0, len(events))
+func eventTypes(events []eventRow) []EventType {
+	types := make([]EventType, 0, len(events))
 	for _, e := range events {
 		types = append(types, e.Type)
 	}
@@ -199,8 +200,8 @@ func TestSyncCreatesServicesAndRevision(t *testing.T) {
 		}
 	}
 
-	want := []string{EventSyncStarted, EventSyncSucceeded}
-	if types := eventTypes(e.events(t, "prod")); strings.Join(types, ",") != strings.Join(want, ",") {
+	want := []EventType{EventSyncStarted, EventSyncSucceeded}
+	if types := eventTypes(e.events(t, "prod")); !slices.Equal(types, want) {
 		t.Fatalf("events = %v, want %v", types, want)
 	}
 }

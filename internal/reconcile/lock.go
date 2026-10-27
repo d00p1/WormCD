@@ -17,6 +17,10 @@ func (r Ref) String() string { return r.Application + "/" + r.Target }
 // locks serializes operations on the same target within this process. Each
 // target has its own one-slot semaphore, so different targets never wait for
 // each other. Waiting honors ctx.
+//
+// The map gets one entry per target and is never pruned. The number of targets
+// is bounded and checked up front (ADR-0007), so the registry cannot grow
+// without limit.
 type locks struct {
 	mu    sync.Mutex
 	slots map[Ref]chan struct{}
