@@ -119,6 +119,113 @@ func TestCanonicalSortsMapKeys(t *testing.T) {
 	}
 }
 
+// inOrder returns x and y in the given order, so a test can feed the same
+// tied elements to Canonical both ways.
+func inOrder[T any](reversed bool, x, y T) []T {
+	if reversed {
+		return []T{y, x}
+	}
+	return []T{x, y}
+}
+
+func TestCanonicalTieBreakIgnoresInputOrder(t *testing.T) {
+	tests := []struct {
+		name  string
+		build func(reversed bool) Desired
+	}{
+		{"services", func(r bool) Desired {
+			return Desired{Services: inOrder(r,
+				Service{Name: "web", Image: "web:1", Mode: ModeReplicated},
+				Service{Name: "web", Image: "web:2", Mode: ModeReplicated},
+			)}
+		}},
+		{"networks", func(r bool) Desired {
+			return Desired{Networks: inOrder(r,
+				Network{Name: "front", Driver: "bridge"},
+				Network{Name: "front", Driver: "overlay"},
+			)}
+		}},
+		{"configs", func(r bool) Desired {
+			return Desired{Configs: inOrder(r,
+				Config{Name: "nginx", Source: "a"},
+				Config{Name: "nginx", Source: "b"},
+			)}
+		}},
+		{"secrets", func(r bool) Desired {
+			return Desired{Secrets: inOrder(r,
+				Secret{Name: "pw", Source: "a"},
+				Secret{Name: "pw", Source: "b"},
+			)}
+		}},
+		{"volumes", func(r bool) Desired {
+			return Desired{Volumes: inOrder(r,
+				Volume{Name: "data", Driver: "local"},
+				Volume{Name: "data", Driver: "nfs"},
+			)}
+		}},
+		{"ports", func(r bool) Desired {
+			return Desired{Services: []Service{{Name: "web", Ports: inOrder(r,
+				Port{Target: 80, Published: 8080, Protocol: "tcp", Mode: "ingress"},
+				Port{Target: 80, Published: 8080, Protocol: "tcp", Mode: "host"},
+			)}}}
+		}},
+		{"service networks", func(r bool) Desired {
+			return Desired{Services: []Service{{Name: "web", Networks: inOrder(r,
+				ServiceNetwork{Name: "front", Aliases: []string{"a"}},
+				ServiceNetwork{Name: "front", Aliases: []string{"b"}},
+			)}}}
+		}},
+		{"mounts by type", func(r bool) Desired {
+			return Desired{Services: []Service{{Name: "web", Mounts: inOrder(r,
+				Mount{Type: MountVolume, Source: "data", Target: "/data"},
+				Mount{Type: MountBind, Source: "/data", Target: "/data"},
+			)}}}
+		}},
+		{"mounts by source", func(r bool) Desired {
+			return Desired{Services: []Service{{Name: "web", Mounts: inOrder(r,
+				Mount{Type: MountBind, Source: "/a", Target: "/data"},
+				Mount{Type: MountBind, Source: "/b", Target: "/data"},
+			)}}}
+		}},
+		{"mounts by readonly", func(r bool) Desired {
+			return Desired{Services: []Service{{Name: "web", Mounts: inOrder(r,
+				Mount{Type: MountBind, Source: "/a", Target: "/data"},
+				Mount{Type: MountBind, Source: "/a", Target: "/data", ReadOnly: true},
+			)}}}
+		}},
+		{"service configs", func(r bool) Desired {
+			return Desired{Services: []Service{{Name: "web", Configs: inOrder(r,
+				ConfigRef{Source: "a", Target: "/etc/x", Mode: 0o440},
+				ConfigRef{Source: "b", Target: "/etc/x", Mode: 0o440},
+			)}}}
+		}},
+		{"service secrets", func(r bool) Desired {
+			return Desired{Services: []Service{{Name: "web", Secrets: inOrder(r,
+				SecretRef{Source: "a", Target: "/run/pw", Mode: 0o400},
+				SecretRef{Source: "a", Target: "/run/pw", Mode: 0o440},
+			)}}}
+		}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			forward := tc.build(false)
+			backward := tc.build(true)
+			want, err := Canonical(&forward)
+			if err != nil {
+				t.Fatalf("Canonical(forward): %v", err)
+			}
+			got, err := Canonical(&backward)
+			if err != nil {
+				t.Fatalf("Canonical(backward): %v", err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Errorf("tied elements depend on input order:\n%s\n%s", got, want)
+			}
+		})
+	}
+}
+
 func TestCanonicalEmptyDesired(t *testing.T) {
 	var d Desired
 	if _, err := Canonical(&d); err != nil {

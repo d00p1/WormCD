@@ -5,7 +5,10 @@
 package desired
 
 import (
-	"sort"
+	"bytes"
+	"cmp"
+	"encoding/json"
+	"slices"
 	"strings"
 	"time"
 )
@@ -239,9 +242,14 @@ func (d *Desired) Sort() {
 	SortVolumes(d.Volumes)
 }
 
+// Every sort compares a full key, so elements that compare equal are
+// identical in their encoding and the output does not depend on input order.
+
 // SortServices orders services by name and each service's nested collections.
 func SortServices(services []Service) {
-	sort.Slice(services, func(i, j int) bool { return services[i].Name < services[j].Name })
+	slices.SortFunc(services, func(a, b Service) int {
+		return cmp.Or(strings.Compare(a.Name, b.Name), compareEncoded(a, b))
+	})
 	for i := range services {
 		services[i].sort()
 	}
@@ -249,39 +257,103 @@ func SortServices(services []Service) {
 
 // SortNetworks orders networks by name.
 func SortNetworks(networks []Network) {
-	sort.Slice(networks, func(i, j int) bool { return networks[i].Name < networks[j].Name })
+	slices.SortFunc(networks, func(a, b Network) int {
+		return cmp.Or(strings.Compare(a.Name, b.Name), compareEncoded(a, b))
+	})
 }
 
 // SortConfigs orders configs by name.
 func SortConfigs(configs []Config) {
-	sort.Slice(configs, func(i, j int) bool { return configs[i].Name < configs[j].Name })
+	slices.SortFunc(configs, func(a, b Config) int {
+		return cmp.Or(strings.Compare(a.Name, b.Name), compareEncoded(a, b))
+	})
 }
 
 // SortSecrets orders secrets by name.
 func SortSecrets(secrets []Secret) {
-	sort.Slice(secrets, func(i, j int) bool { return secrets[i].Name < secrets[j].Name })
+	slices.SortFunc(secrets, func(a, b Secret) int {
+		return cmp.Or(strings.Compare(a.Name, b.Name), compareEncoded(a, b))
+	})
 }
 
 // SortVolumes orders volumes by name.
 func SortVolumes(volumes []Volume) {
-	sort.Slice(volumes, func(i, j int) bool { return volumes[i].Name < volumes[j].Name })
+	slices.SortFunc(volumes, func(a, b Volume) int {
+		return cmp.Or(strings.Compare(a.Name, b.Name), compareEncoded(a, b))
+	})
 }
 
 func (s *Service) sort() {
-	sort.Slice(s.Ports, func(i, j int) bool {
-		a, b := s.Ports[i], s.Ports[j]
-		if a.Target != b.Target {
-			return a.Target < b.Target
-		}
-		if a.Protocol != b.Protocol {
-			return a.Protocol < b.Protocol
-		}
-		return a.Published < b.Published
-	})
-	sort.Slice(s.Networks, func(i, j int) bool { return s.Networks[i].Name < s.Networks[j].Name })
-	sort.Slice(s.Mounts, func(i, j int) bool { return s.Mounts[i].Target < s.Mounts[j].Target })
-	sort.Slice(s.Configs, func(i, j int) bool { return s.Configs[i].Target < s.Configs[j].Target })
-	sort.Slice(s.Secrets, func(i, j int) bool { return s.Secrets[i].Target < s.Secrets[j].Target })
+	slices.SortFunc(s.Ports, comparePort)
+	slices.SortFunc(s.Networks, compareServiceNetwork)
+	slices.SortFunc(s.Mounts, compareMount)
+	slices.SortFunc(s.Configs, compareConfigRef)
+	slices.SortFunc(s.Secrets, compareSecretRef)
+}
+
+func comparePort(a, b Port) int {
+	return cmp.Or(
+		cmp.Compare(a.Target, b.Target),
+		strings.Compare(a.Protocol, b.Protocol),
+		cmp.Compare(a.Published, b.Published),
+		strings.Compare(a.Mode, b.Mode),
+		strings.Compare(a.Name, b.Name),
+	)
+}
+
+func compareServiceNetwork(a, b ServiceNetwork) int {
+	return cmp.Or(
+		strings.Compare(a.Name, b.Name),
+		slices.Compare(a.Aliases, b.Aliases),
+	)
+}
+
+func compareMount(a, b Mount) int {
+	return cmp.Or(
+		strings.Compare(a.Target, b.Target),
+		strings.Compare(string(a.Type), string(b.Type)),
+		strings.Compare(a.Source, b.Source),
+		compareBool(a.ReadOnly, b.ReadOnly),
+	)
+}
+
+func compareConfigRef(a, b ConfigRef) int {
+	return cmp.Or(
+		strings.Compare(a.Target, b.Target),
+		strings.Compare(a.Source, b.Source),
+		strings.Compare(a.UID, b.UID),
+		strings.Compare(a.GID, b.GID),
+		cmp.Compare(a.Mode, b.Mode),
+	)
+}
+
+func compareSecretRef(a, b SecretRef) int {
+	return cmp.Or(
+		strings.Compare(a.Target, b.Target),
+		strings.Compare(a.Source, b.Source),
+		strings.Compare(a.UID, b.UID),
+		strings.Compare(a.GID, b.GID),
+		cmp.Compare(a.Mode, b.Mode),
+	)
+}
+
+func compareBool(a, b bool) int {
+	switch {
+	case a == b:
+		return 0
+	case !a:
+		return -1
+	default:
+		return 1
+	}
+}
+
+// compareEncoded orders two values by their JSON encoding. It is the last
+// tie-break for elements that agree on every key compared before it.
+func compareEncoded(a, b any) int {
+	ja, _ := json.Marshal(a)
+	jb, _ := json.Marshal(b)
+	return bytes.Compare(ja, jb)
 }
 
 // TargetNamespace is the prefix WormCD gives to every managed runtime object
