@@ -22,6 +22,7 @@ import (
 	"github.com/d00p1/wormcd/internal/reconcile"
 	"github.com/d00p1/wormcd/internal/runtime"
 	"github.com/d00p1/wormcd/internal/runtime/swarm"
+	"github.com/d00p1/wormcd/internal/store"
 	"github.com/d00p1/wormcd/internal/version"
 )
 
@@ -78,8 +79,22 @@ Commands:
 func runServer(args []string) error {
 	fs := flag.NewFlagSet("server", flag.ContinueOnError)
 	listen := fs.String("listen", ":8080", "HTTP listen address")
+	data := fs.String("data", "", "path to the SQLite database; no store is opened when empty")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	if *data != "" {
+		st, err := store.Open(context.Background(), *data)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if err := st.Close(); err != nil {
+				slog.Error("close store", "path", *data, "err", err)
+			}
+		}()
+		slog.Info("store opened", "path", *data)
 	}
 
 	srv := &http.Server{

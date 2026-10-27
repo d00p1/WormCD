@@ -222,11 +222,13 @@ Swarm-реализация:
 clusters(id, name, endpoint, ca_ref, cert_ref, key_ref, labels)
 sources(id, repo_url, branch, path, auth_ref)
 targets(id, app, target, cluster, last_revision, status, message)
-revisions(id, target_id, commit, rendered_spec, image_digests, created_at)
+revisions(id, target_id, number, commit, rendered_spec, image_digests, created_at)  -- UNIQUE(target_id, number)
 events(id, target_id, revision_id, type, payload, created_at)
 ```
 
-`revisions.rendered_spec` хранит полностью отрендеренный манифест — это основа diff-а и rollback без похода в git.
+`revisions.number` — порядковый номер ревизии внутри target (1, 2, …). Пара `(target_id, number)` уникальна. Номер, а не внутренний `id`, — то, чем оперирует пользователь: `rollback --revision N` и `history` ссылаются именно на него. UNIQUE не даёт двум параллельным sync выдать один номер.
+
+`revisions.rendered_spec` хранит полностью отрендеренный `Desired` в JSON — это основа diff-а и rollback без похода в git. Store принимает отрендеренное состояние как значение, реализующее `Canonical() ([]byte, error)` (интерфейс `store.Canonicaler`); `desired.Desired` его реализует. `AppendRevision` сам вызывает `Canonical` и пишет полученные байты, поэтому каноничность гарантируется типом, а не соглашением вызывающего кода. Метод сортирует коллекции в копии `Desired` (не мутируя вход) и маршалит её, ключи map идут в отсортированном порядке, сортировка коллекций сравнивает полный ключ (при равенстве полей — JSON-представление элемента), поэтому одинаковый рендер даёт побайтово одинаковую запись. Если элемент не маршалится (например, NaN), сортировка возвращает ошибку и не меняет порядок; паники нет. Store проверяет только, что результат не пуст и валиден как JSON, и не импортирует `desired` (правило `.go-arch-lint.yml`): зависимость идёт через структурную типизацию интерфейса.
 
 Статусы target: `Unknown`, `Synced`, `OutOfSync`, `Progressing`, `Healthy`, `Degraded`, `Blocked` (нет кластера/невалидный манифест).
 

@@ -38,13 +38,19 @@ type Observed struct {
 	Volumes     []desired.Volume
 }
 
-// Sort puts every collection in a deterministic order.
-func (o *Observed) Sort() {
-	desired.SortServices(o.Services)
-	desired.SortNetworks(o.Networks)
-	desired.SortConfigs(o.Configs)
-	desired.SortSecrets(o.Secrets)
-	desired.SortVolumes(o.Volumes)
+// Sort puts every collection in a deterministic order. It fails without
+// reordering anything if an element cannot be encoded.
+func (o *Observed) Sort() error {
+	// The view shares o's slices, so sorting it sorts o. Desired.Sort checks
+	// every collection before it sorts any of them.
+	view := desired.Desired{
+		Services: o.Services,
+		Networks: o.Networks,
+		Configs:  o.Configs,
+		Secrets:  o.Secrets,
+		Volumes:  o.Volumes,
+	}
+	return view.Sort()
 }
 
 // Set is a set of object keys. Prune uses it to decide which managed objects

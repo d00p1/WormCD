@@ -5,7 +5,11 @@
 package desired
 
 import (
-	"sort"
+	"bytes"
+	"cmp"
+	"encoding/json"
+	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -229,59 +233,230 @@ type Volume struct {
 	External   bool              `json:"external,omitempty"`
 }
 
-// Sort puts every collection in a deterministic order. Callers should invoke
-// it before marshaling or diffing.
-func (d *Desired) Sort() {
-	SortServices(d.Services)
-	SortNetworks(d.Networks)
-	SortConfigs(d.Configs)
-	SortSecrets(d.Secrets)
-	SortVolumes(d.Volumes)
+// Sort puts every collection in a deterministic order, in place. If any element
+// that needs a tie-break cannot be encoded, Sort returns an error and changes
+// nothing. To get the canonical JSON of a state without changing it, use
+// Canonical.
+func (d *Desired) Sort() error {
+	services, err := planServices(d.Services)
+	if err != nil {
+		return err
+	}
+	networks, err := planNetworks(d.Networks)
+	if err != nil {
+		return err
+	}
+	configs, err := planConfigs(d.Configs)
+	if err != nil {
+		return err
+	}
+	secrets, err := planSecrets(d.Secrets)
+	if err != nil {
+		return err
+	}
+	volumes, err := planVolumes(d.Volumes)
+	if err != nil {
+		return err
+	}
+	services()
+	networks()
+	configs()
+	secrets()
+	volumes()
+	return nil
 }
 
+// Every sort compares a full key, so elements that compare equal are
+// identical in their encoding and the output does not depend on input order.
+
 // SortServices orders services by name and each service's nested collections.
-func SortServices(services []Service) {
-	sort.Slice(services, func(i, j int) bool { return services[i].Name < services[j].Name })
-	for i := range services {
-		services[i].sort()
+func SortServices(services []Service) error {
+	sortServices, err := planServices(services)
+	if err != nil {
+		return err
 	}
+	sortServices()
+	return nil
 }
 
 // SortNetworks orders networks by name.
-func SortNetworks(networks []Network) {
-	sort.Slice(networks, func(i, j int) bool { return networks[i].Name < networks[j].Name })
+func SortNetworks(networks []Network) error {
+	sortNetworks, err := planNetworks(networks)
+	if err != nil {
+		return err
+	}
+	sortNetworks()
+	return nil
 }
 
 // SortConfigs orders configs by name.
-func SortConfigs(configs []Config) {
-	sort.Slice(configs, func(i, j int) bool { return configs[i].Name < configs[j].Name })
+func SortConfigs(configs []Config) error {
+	sortConfigs, err := planConfigs(configs)
+	if err != nil {
+		return err
+	}
+	sortConfigs()
+	return nil
 }
 
 // SortSecrets orders secrets by name.
-func SortSecrets(secrets []Secret) {
-	sort.Slice(secrets, func(i, j int) bool { return secrets[i].Name < secrets[j].Name })
+func SortSecrets(secrets []Secret) error {
+	sortSecrets, err := planSecrets(secrets)
+	if err != nil {
+		return err
+	}
+	sortSecrets()
+	return nil
 }
 
 // SortVolumes orders volumes by name.
-func SortVolumes(volumes []Volume) {
-	sort.Slice(volumes, func(i, j int) bool { return volumes[i].Name < volumes[j].Name })
+func SortVolumes(volumes []Volume) error {
+	sortVolumes, err := planVolumes(volumes)
+	if err != nil {
+		return err
+	}
+	sortVolumes()
+	return nil
+}
+
+// planNetworks, planConfigs, planSecrets and planVolumes are planSort for
+// each kind, named by its Name field. Sort and the Sort* functions share them.
+func planNetworks(networks []Network) (func(), error) {
+	return planSort(networks, KindNetwork, func(n Network) string { return n.Name })
+}
+
+func planConfigs(configs []Config) (func(), error) {
+	return planSort(configs, KindConfig, func(c Config) string { return c.Name })
+}
+
+func planSecrets(secrets []Secret) (func(), error) {
+	return planSort(secrets, KindSecret, func(s Secret) string { return s.Name })
+}
+
+func planVolumes(volumes []Volume) (func(), error) {
+	return planSort(volumes, KindVolume, func(v Volume) string { return v.Name })
+}
+
+// planSort encodes the elements whose names are shared, the only ones the
+// tie-break compares, and returns the sort. The sort cannot fail, so callers
+// can plan several collections and only then reorder any of them.
+func planSort[T any](elems []T, kind Kind, name func(T) string) (func(), error) {
+	shared := make(map[string]int, len(elems))
+	for _, e := range elems {
+		shared[name(e)]++
+	}
+	type entry struct {
+		elem T
+		name string
+		enc  []byte
+	}
+	entries := make([]entry, len(elems))
+	for i, e := range elems {
+		n := name(e)
+		entries[i] = entry{elem: e, name: n}
+		if shared[n] > 1 {
+			enc, err := json.Marshal(e)
+			if err != nil {
+				return nil, fmt.Errorf("desired: cannot sort %s %q: %w", kind, n, err)
+			}
+			entries[i].enc = enc
+		}
+	}
+	return func() {
+		slices.SortFunc(entries, func(a, b entry) int {
+			if c := strings.Compare(a.name, b.name); c != 0 {
+				return c
+			}
+			return bytes.Compare(a.enc, b.enc)
+		})
+		for i := range entries {
+			elems[i] = entries[i].elem
+		}
+	}, nil
+}
+
+// planServices is planSort for services, followed by the nested sorts of each
+// service.
+func planServices(services []Service) (func(), error) {
+	sortServices, err := planSort(services, KindService, func(s Service) string { return s.Name })
+	if err != nil {
+		return nil, err
+	}
+	return func() {
+		sortServices()
+		for i := range services {
+			services[i].sort()
+		}
+	}, nil
 }
 
 func (s *Service) sort() {
-	sort.Slice(s.Ports, func(i, j int) bool {
-		a, b := s.Ports[i], s.Ports[j]
-		if a.Target != b.Target {
-			return a.Target < b.Target
-		}
-		if a.Protocol != b.Protocol {
-			return a.Protocol < b.Protocol
-		}
-		return a.Published < b.Published
+	slices.SortFunc(s.Ports, comparePort)
+	slices.SortFunc(s.Networks, compareServiceNetwork)
+	slices.SortFunc(s.Mounts, compareMount)
+	slices.SortFunc(s.Configs, func(a, b ConfigRef) int {
+		return compareFileRef(fileRef(a), fileRef(b))
 	})
-	sort.Slice(s.Networks, func(i, j int) bool { return s.Networks[i].Name < s.Networks[j].Name })
-	sort.Slice(s.Mounts, func(i, j int) bool { return s.Mounts[i].Target < s.Mounts[j].Target })
-	sort.Slice(s.Configs, func(i, j int) bool { return s.Configs[i].Target < s.Configs[j].Target })
-	sort.Slice(s.Secrets, func(i, j int) bool { return s.Secrets[i].Target < s.Secrets[j].Target })
+	slices.SortFunc(s.Secrets, func(a, b SecretRef) int {
+		return compareFileRef(fileRef(a), fileRef(b))
+	})
+}
+
+func comparePort(a, b Port) int {
+	return cmp.Or(
+		cmp.Compare(a.Target, b.Target),
+		strings.Compare(a.Protocol, b.Protocol),
+		cmp.Compare(a.Published, b.Published),
+		strings.Compare(a.Mode, b.Mode),
+		strings.Compare(a.Name, b.Name),
+	)
+}
+
+func compareServiceNetwork(a, b ServiceNetwork) int {
+	return cmp.Or(
+		strings.Compare(a.Name, b.Name),
+		slices.Compare(a.Aliases, b.Aliases),
+	)
+}
+
+func compareMount(a, b Mount) int {
+	return cmp.Or(
+		strings.Compare(a.Target, b.Target),
+		strings.Compare(string(a.Type), string(b.Type)),
+		strings.Compare(a.Source, b.Source),
+		compareBool(a.ReadOnly, b.ReadOnly),
+	)
+}
+
+// fileRef holds the fields that ConfigRef and SecretRef share, in the same
+// order, so either converts to it.
+type fileRef struct {
+	Source string
+	Target string
+	UID    string
+	GID    string
+	Mode   uint32
+}
+
+func compareFileRef(a, b fileRef) int {
+	return cmp.Or(
+		strings.Compare(a.Target, b.Target),
+		strings.Compare(a.Source, b.Source),
+		strings.Compare(a.UID, b.UID),
+		strings.Compare(a.GID, b.GID),
+		cmp.Compare(a.Mode, b.Mode),
+	)
+}
+
+func compareBool(a, b bool) int {
+	switch {
+	case a == b:
+		return 0
+	case !a:
+		return -1
+	default:
+		return 1
+	}
 }
 
 // TargetNamespace is the prefix WormCD gives to every managed runtime object

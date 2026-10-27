@@ -68,7 +68,9 @@ func normalize(project *types.Project, app string, target Target, namespace, bas
 		return nil, err
 	}
 
-	n.out.Sort()
+	if err := n.out.Sort(); err != nil {
+		return nil, err
+	}
 	return n.out, nil
 }
 
