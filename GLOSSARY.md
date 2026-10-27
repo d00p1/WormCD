@@ -8,7 +8,7 @@
 
 ## Target
 
-Конкретная пара «приложение + окружение + кластер», в которую выполняется sync. Полное имя — `app/target`, например `web/prod`. Один Application может иметь несколько Target.
+Конкретная цель sync: пара `app/target`, например `web/prod`. Уникальность — по `(app, target)`. В v0 target привязан ровно к одному Cluster; кластер — атрибут target, а не часть ключа. Один Application может иметь несколько Target.
 
 ## Cluster
 
