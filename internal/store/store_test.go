@@ -80,6 +80,62 @@ func TestOpenIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestOpenConcurrentlyOnNewFile(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "wormcd.db")
+
+	const openers = 4
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	errs := make(chan error, openers)
+	stores := make(chan *Store, openers)
+	for range openers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			s, err := Open(ctx, path)
+			if err != nil {
+				errs <- err
+				return
+			}
+			stores <- s
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	close(stores)
+	for err := range errs {
+		t.Errorf("Open: %v", err)
+	}
+	for s := range stores {
+		var version int
+		if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+			t.Errorf("user_version: %v", err)
+		} else if version != len(migrations) {
+			t.Errorf("user_version = %d, want %d", version, len(migrations))
+		}
+		_ = s.Close()
+	}
+
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	for _, table := range []string{"targets", "revisions", "events"} {
+		var count int
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&count); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		if count != 1 {
+			t.Errorf("table %s count = %d, want 1", table, count)
+		}
+	}
+}
+
 func TestOpenRejectsNewerSchema(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "wormcd.db")

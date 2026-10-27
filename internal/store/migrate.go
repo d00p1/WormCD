@@ -42,28 +42,31 @@ var migrations = []string{
 	);`,
 }
 
+// migrate reads the schema version and applies pending migrations in one
+// transaction. Transactions begin with BEGIN IMMEDIATE, so the version is read
+// under the write lock and a concurrent opener waits instead of re-running a
+// migration another process has already applied.
 func migrate(ctx context.Context, db *sql.DB) error {
-	var version int
-	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
-		return fmt.Errorf("store: read schema version: %w", err)
-	}
-	if version > len(migrations) {
-		return fmt.Errorf("store: schema version %d is newer than supported %d", version, len(migrations))
-	}
+	return withTx(ctx, db, func(tx *sql.Tx) error {
+		var version int
+		if err := tx.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+			return fmt.Errorf("store: read schema version: %w", err)
+		}
+		if version > len(migrations) {
+			return fmt.Errorf("store: schema version %d is newer than supported %d", version, len(migrations))
+		}
 
-	for i := version; i < len(migrations); i++ {
-		if err := withTx(ctx, db, func(tx *sql.Tx) error {
+		for i := version; i < len(migrations); i++ {
 			if _, err := tx.ExecContext(ctx, migrations[i]); err != nil {
-				return err
+				return fmt.Errorf("store: migrate to version %d: %w", i+1, err)
 			}
 			// PRAGMA does not accept bound parameters; the value is a trusted int.
-			_, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", i+1))
-			return err
-		}); err != nil {
-			return fmt.Errorf("store: migrate to version %d: %w", i+1, err)
+			if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", i+1)); err != nil {
+				return fmt.Errorf("store: migrate to version %d: %w", i+1, err)
+			}
 		}
-	}
-	return nil
+		return nil
+	})
 }
 
 func withTx(ctx context.Context, db *sql.DB, fn func(*sql.Tx) error) error {
