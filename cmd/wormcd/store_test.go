@@ -49,19 +49,40 @@ func TestRenderedSpecIsCanonicalAfterSort(t *testing.T) {
 		}
 	}
 
-	marshal := func(d desired.Desired) []byte {
-		d.Sort()
-		raw, err := json.Marshal(d)
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "wormcd.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+	if _, err := st.EnsureTarget(ctx, "web", "prod", ""); err != nil {
+		t.Fatalf("EnsureTarget: %v", err)
+	}
+
+	canonical := func(d desired.Desired) []byte {
+		raw, err := desired.Canonical(&d)
 		if err != nil {
-			t.Fatalf("marshal: %v", err)
+			t.Fatalf("Canonical: %v", err)
 		}
 		return raw
 	}
 
-	forward := marshal(build(false))
-	reversed := marshal(build(true))
+	forward := canonical(build(false))
+	reversed := canonical(build(true))
 	if !bytes.Equal(forward, reversed) {
-		t.Fatalf("sorted specs differ:\n%s\n%s", forward, reversed)
+		t.Fatalf("canonical specs differ:\n%s\n%s", forward, reversed)
+	}
+
+	number, err := st.AppendRevision(ctx, "web", "prod", store.NewRevision{Commit: "abc123", RenderedSpec: reversed})
+	if err != nil {
+		t.Fatalf("AppendRevision: %v", err)
+	}
+	rev, err := st.Revision(ctx, "web", "prod", number)
+	if err != nil {
+		t.Fatalf("Revision: %v", err)
+	}
+	if !bytes.Equal(rev.RenderedSpec, forward) {
+		t.Errorf("stored spec differs from canonical render:\n got: %s\nwant: %s", rev.RenderedSpec, forward)
 	}
 }
 
@@ -91,8 +112,8 @@ func TestRenderedRevisionRoundTrip(t *testing.T) {
 				Command:      &command,
 				Env:          map[string]string{"LOG": "info"},
 				Ports: []desired.Port{
-					{Target: 8080, Published: 80, Protocol: "tcp", Mode: "ingress"},
 					{Target: 53, Published: 53, Protocol: "udp", Mode: "host"},
+					{Target: 8080, Published: 80, Protocol: "tcp", Mode: "ingress"},
 				},
 				Networks: []desired.ServiceNetwork{{Name: "front", Aliases: []string{"web"}}},
 				Mounts:   []desired.Mount{{Type: desired.MountVolume, Source: "data", Target: "/data"}},
@@ -121,10 +142,9 @@ func TestRenderedRevisionRoundTrip(t *testing.T) {
 		Volumes: []desired.Volume{{Name: "data", Driver: "local"}},
 	}
 
-	original.Sort()
-	spec, err := json.Marshal(original)
+	spec, err := desired.Canonical(&original)
 	if err != nil {
-		t.Fatalf("marshal: %v", err)
+		t.Fatalf("Canonical: %v", err)
 	}
 	number, err := st.AppendRevision(ctx, "web", "prod", store.NewRevision{Commit: "abc123", RenderedSpec: spec})
 	if err != nil {
