@@ -18,6 +18,7 @@ const (
 type Stage string
 
 const (
+	stageProgress Stage = "progress"
 	stageStart    Stage = "start"
 	stageTarget   Stage = "target"
 	stageRender   Stage = "render"

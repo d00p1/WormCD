@@ -285,8 +285,8 @@ func TestSyncCanceledDuringApplyDegrades(t *testing.T) {
 		t.Fatalf("Sync err = %v, want context.Canceled", res.err)
 	}
 	got := e.assertState(t, "prod", store.StatusDegraded, 0)
-	if !strings.Contains(got.Message, "apply") {
-		t.Errorf("message = %q, want it to name the apply stage", got.Message)
+	if !strings.Contains(got.Message, "sync canceled by caller") {
+		t.Errorf("message = %q, want it to say the caller canceled", got.Message)
 	}
 	events := e.events(t, "prod")
 	if last := events[len(events)-1]; last.Type != EventSyncFailed || !strings.Contains(last.Payload, `"stage":"apply"`) {
@@ -315,18 +315,84 @@ func TestSyncDeadlineExceededDuringApplyDegrades(t *testing.T) {
 	}
 }
 
-// failingStore makes SetTargetState fail for one status and passes everything
-// else to the real store.
+// failingStore makes the writes listed in failStatuses and failEvents fail and
+// passes everything else to the real store.
 type failingStore struct {
 	reconcileStore
-	failStatus store.Status
+	failStatuses []store.Status
+	failEvents   []EventType
 }
 
 func (f failingStore) SetTargetState(ctx context.Context, application, target string, status store.Status, message string, lastRevision int64) error {
-	if status == f.failStatus {
+	if slices.Contains(f.failStatuses, status) {
 		return errors.New("injected: set status")
 	}
 	return f.reconcileStore.SetTargetState(ctx, application, target, status, message, lastRevision)
+}
+
+func (f failingStore) AddEvent(ctx context.Context, e store.Event) error {
+	if slices.Contains(f.failEvents, EventType(e.Type)) {
+		return errors.New("injected: add event")
+	}
+	return f.reconcileStore.AddEvent(ctx, e)
+}
+
+func TestSyncProgressingWriteFailureDegrades(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	e.svc.store = failingStore{reconcileStore: e.st, failStatuses: []store.Status{store.StatusProgressing}}
+
+	if _, err := e.svc.Sync(ctx, prod); err == nil || !strings.Contains(err.Error(), "progress") {
+		t.Fatalf("Sync err = %v, want the progress stage error", err)
+	}
+	if n := e.revisionCount(t, "prod"); n != 0 {
+		t.Fatalf("revisions = %d, want 0", n)
+	}
+	e.assertState(t, "prod", store.StatusDegraded, 0)
+	events := e.events(t, "prod")
+	if last := events[len(events)-1]; last.Type != EventSyncFailed || !strings.Contains(last.Payload, `"stage":"progress"`) {
+		t.Fatalf("last event = %+v, want sync.failed at progress", last)
+	}
+}
+
+func TestSyncProgressingAndDegradedWritesFailReturnsBoth(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	e.svc.store = failingStore{
+		reconcileStore: e.st,
+		failStatuses:   []store.Status{store.StatusProgressing, store.StatusDegraded},
+	}
+
+	_, err := e.svc.Sync(ctx, prod)
+	if err == nil {
+		t.Fatal("Sync: want error")
+	}
+	// The stage error and the failed Degraded write are both reported.
+	if n := strings.Count(err.Error(), "injected: set status"); n != 2 {
+		t.Fatalf("err = %q, want both status write errors (count %d)", err, n)
+	}
+	if events := e.events(t, "prod"); len(events) == 0 || events[len(events)-1].Type != EventSyncFailed {
+		t.Fatalf("events = %+v, want sync.failed recorded", events)
+	}
+}
+
+func TestSyncSucceededEventFailureReturnsRevision(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	if _, err := e.svc.Sync(ctx, prod); err != nil {
+		t.Fatalf("first Sync: %v", err)
+	}
+
+	e.setImage(t, imageV2)
+	e.svc.store = failingStore{reconcileStore: e.st, failEvents: []EventType{EventSyncSucceeded}}
+	number, err := e.svc.Sync(ctx, prod)
+	if err == nil || !strings.Contains(err.Error(), "injected: add event") {
+		t.Fatalf("Sync err = %v, want the event error", err)
+	}
+	if number != 2 {
+		t.Fatalf("revision = %d, want 2: the revision is stored and must be reported", number)
+	}
+	e.assertState(t, "prod", store.StatusSynced, 2)
 }
 
 func TestSyncStatusWriteFailureAfterRevisionDegrades(t *testing.T) {
@@ -337,7 +403,7 @@ func TestSyncStatusWriteFailureAfterRevisionDegrades(t *testing.T) {
 	}
 
 	e.setImage(t, imageV2)
-	e.svc.store = failingStore{reconcileStore: e.st, failStatus: store.StatusSynced}
+	e.svc.store = failingStore{reconcileStore: e.st, failStatuses: []store.Status{store.StatusSynced}}
 	if _, err := e.svc.Sync(ctx, prod); err == nil || !strings.Contains(err.Error(), "injected") {
 		t.Fatalf("Sync err = %v, want the injected status error", err)
 	}

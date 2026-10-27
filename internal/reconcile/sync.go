@@ -44,6 +44,10 @@ type Config struct {
 // not hang on a stuck database.
 const finishTimeout = 10 * time.Second
 
+// errSyncDeadline is the cause of the run context when SyncTimeout expires. It
+// tells that deadline apart from a cancellation of the caller's context.
+var errSyncDeadline = errors.New("sync deadline")
+
 // Service runs sync, rollback and status for targets. Operations on one target
 // are serialized in this process (ADR-0007); different targets run in parallel.
 type Service struct {
@@ -148,18 +152,20 @@ func (s *Service) execute(ctx context.Context, r Ref, op operation, src source) 
 	}
 	release, err := s.locks.acquire(ctx, r)
 	if err != nil {
-		return 0, fmt.Errorf("%s %s: %w", op.kind, r, err)
+		return 0, runErr(op, r, err)
 	}
 	defer release()
-	ctx, cancel := context.WithTimeout(ctx, s.syncTimeout)
+	ctx, cancel := context.WithTimeoutCause(ctx, s.syncTimeout, errSyncDeadline)
 	defer cancel()
 
+	// Without the target row there is nothing to record a failure on, so this
+	// error is returned as it is.
 	target, err := s.store.EnsureTarget(ctx, r.Application, r.Target, "")
 	if err != nil {
-		return 0, fmt.Errorf("%s %s: %w", op.kind, r, err)
+		return 0, runErr(op, r, err)
 	}
 	if err := s.store.SetTargetState(ctx, r.Application, r.Target, store.StatusProgressing, op.message, target.LastRevision); err != nil {
-		return 0, fmt.Errorf("%s %s: %w", op.kind, r, err)
+		return 0, s.fail(ctx, r, op, store.StatusDegraded, stageProgress, target.LastRevision, err)
 	}
 	if err := s.event(ctx, r, op.revision, op.started, op.message, "", ""); err != nil {
 		return 0, s.fail(ctx, r, op, store.StatusDegraded, stageStart, target.LastRevision, err)
@@ -192,8 +198,6 @@ func (s *Service) execute(ctx context.Context, r Ref, op operation, src source) 
 func (s *Service) converge(ctx context.Context, r Ref, op operation, state *desired.Desired, rt runtime.Runtime, last int64) (int64, error) {
 	plan, err := observe(ctx, r, state, rt)
 	if err != nil {
-		// TODO(#20 review): Blocked or Degraded for an Inspect error, and whether
-		// the cluster calls need timeouts, is decided separately. Do not change here.
 		return 0, s.fail(ctx, r, op, store.StatusBlocked, stageInspect, last, err)
 	}
 	if plan.HasChanges() {
@@ -230,8 +234,10 @@ func (s *Service) converge(ctx context.Context, r Ref, op operation, state *desi
 		cause := fmt.Errorf("revision %d recorded but status not updated: %w", number, err)
 		return 0, s.fail(ctx, r, op, store.StatusDegraded, stageStatus, number, cause)
 	}
+	// The revision and the Synced status are already stored, so the number is
+	// returned with the error: the caller learns that the revision exists.
 	if err := s.event(ctx, r, number, op.succeeded, op.successMessage(number), "", ""); err != nil {
-		return 0, fmt.Errorf("%s %s: %w", op.kind, r, err)
+		return number, runErr(op, r, err)
 	}
 	return number, nil
 }
@@ -256,10 +262,7 @@ func (s *Service) render(ctx context.Context, r Ref) (*desired.Desired, string, 
 // returned error carries the stage and the cause. Store errors are joined to it
 // so that a failed record is not lost.
 func (s *Service) fail(ctx context.Context, r Ref, op operation, status store.Status, stage Stage, last int64, cause error) error {
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		cause = fmt.Errorf("%s deadline exceeded after %s: %w", op.kind, s.syncTimeout, cause)
-	}
-	err := fmt.Errorf("%s %s: %s: %w", op.kind, r, stage, cause)
+	err := runErr(op, r, fmt.Errorf("%s: %w", stage, s.interrupted(ctx, op, cause)))
 	// The run may have failed because ctx was canceled, so the failure is
 	// written with a context that ignores cancellation.
 	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finishTimeout)
@@ -267,6 +270,23 @@ func (s *Service) fail(ctx context.Context, r Ref, op operation, status store.St
 	setErr := s.store.SetTargetState(fctx, r.Application, r.Target, status, err.Error(), last)
 	evErr := s.event(fctx, r, op.revision, op.failed, fmt.Sprintf("%s failed at %s", op.kind, stage), stage, cause.Error())
 	return errors.Join(err, setErr, evErr)
+}
+
+// interrupted names why the run's context ended, when it did. The run's own
+// deadline and a cancellation by the caller are different outcomes.
+func (s *Service) interrupted(ctx context.Context, op operation, cause error) error {
+	if ctx.Err() == nil {
+		return cause
+	}
+	if errors.Is(context.Cause(ctx), errSyncDeadline) {
+		return fmt.Errorf("%s deadline exceeded after %s: %w", op.kind, s.syncTimeout, cause)
+	}
+	return fmt.Errorf("%s canceled by caller: %w", op.kind, cause)
+}
+
+// runErr prefixes err with the run's kind and target.
+func runErr(op operation, r Ref, err error) error {
+	return fmt.Errorf("%s %s: %w", op.kind, r, err)
 }
 
 func (s *Service) event(ctx context.Context, r Ref, revision int64, typ EventType, message string, stage Stage, cause string) error {
