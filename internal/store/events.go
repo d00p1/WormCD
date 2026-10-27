@@ -4,12 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 )
 
 // Event is an entry in the history of a target. Revision is the number of the
-// related revision, or 0 when the event is not tied to one.
+// related revision, or 0 when the event is not tied to one. Type is free text
+// for now; the event producers that define its values arrive with #20.
 type Event struct {
 	Application string
 	Target      string
@@ -19,7 +19,7 @@ type Event struct {
 }
 
 // AddEvent records e. Payload is encoded as JSON; a nil payload is stored as
-// NULL.
+// NULL. Nothing in #19 calls AddEvent; the event producers arrive with #20.
 func (s *Store) AddEvent(ctx context.Context, e Event) error {
 	var payload sql.NullString
 	if e.Payload != nil {
@@ -38,15 +38,11 @@ func (s *Store) AddEvent(ctx context.Context, e Event) error {
 
 		var revisionID sql.NullInt64
 		if e.Revision != 0 {
-			err := tx.QueryRowContext(ctx,
-				`SELECT id FROM revisions WHERE target_id = ? AND number = ?`, t.ID, e.Revision).Scan(&revisionID.Int64)
-			if errors.Is(err, sql.ErrNoRows) {
-				return ErrNotFound
-			}
+			id, err := findRevisionID(ctx, tx, t.ID, e.Revision)
 			if err != nil {
 				return err
 			}
-			revisionID.Valid = true
+			revisionID = sql.NullInt64{Int64: id, Valid: true}
 		}
 
 		_, err = tx.ExecContext(ctx, `

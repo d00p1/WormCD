@@ -128,6 +128,18 @@ func (s *Store) Revisions(ctx context.Context, application, target string) ([]Re
 	return revisions, nil
 }
 
+// findRevisionID returns the row id of revision number of the target with
+// targetID, or ErrNotFound.
+func findRevisionID(ctx context.Context, q queryer, targetID, number int64) (int64, error) {
+	var id int64
+	err := q.QueryRowContext(ctx,
+		`SELECT id FROM revisions WHERE target_id = ? AND number = ?`, targetID, number).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	return id, err
+}
+
 type rowScanner interface {
 	Scan(dest ...any) error
 }

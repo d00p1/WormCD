@@ -15,18 +15,12 @@ import (
 // ErrNotFound is returned when a target or revision does not exist.
 var ErrNotFound = errors.New("store: not found")
 
-// Status is the observed state of a target.
+// Status is the observed state of a target. Only StatusUnknown is written so
+// far; the rest belong to status reporting.
 type Status string
 
-const (
-	StatusUnknown     Status = "Unknown"
-	StatusSynced      Status = "Synced"
-	StatusOutOfSync   Status = "OutOfSync"
-	StatusProgressing Status = "Progressing"
-	StatusHealthy     Status = "Healthy"
-	StatusDegraded    Status = "Degraded"
-	StatusBlocked     Status = "Blocked"
-)
+// StatusUnknown is the status of a target that has not been observed yet.
+const StatusUnknown Status = "Unknown"
 
 // Store is a SQLite-backed store. It is safe for concurrent use.
 type Store struct {
@@ -102,7 +96,8 @@ func (s *Store) Target(ctx context.Context, application, target string) (Target,
 	return t, err
 }
 
-// queryer is implemented by *sql.DB and *sql.Tx.
+// queryer is implemented by *sql.DB and *sql.Tx. It covers the single-row
+// lookups that take either a handle or a transaction.
 type queryer interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
@@ -142,25 +137,6 @@ func dsnFor(path string) (string, error) {
 		}.Encode(),
 	}
 	return u.String(), nil
-}
-
-// SetStatus records the observed status and a human-readable message for a
-// target.
-func (s *Store) SetStatus(ctx context.Context, application, target string, status Status, message string) error {
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE targets SET status = ?, message = ? WHERE app = ? AND target = ?`,
-		status, message, application, target)
-	if err != nil {
-		return fmt.Errorf("store: set status %s/%s: %w", application, target, err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("store: set status %s/%s: %w", application, target, err)
-	}
-	if n == 0 {
-		return ErrNotFound
-	}
-	return nil
 }
 
 func now() string {

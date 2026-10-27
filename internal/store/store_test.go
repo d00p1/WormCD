@@ -97,7 +97,7 @@ func TestOpenRejectsNewerSchema(t *testing.T) {
 	}
 }
 
-func TestEnsureTargetAndStatus(t *testing.T) {
+func TestEnsureTarget(t *testing.T) {
 	ctx := context.Background()
 	s, _ := openTemp(t)
 
@@ -117,20 +117,6 @@ func TestEnsureTargetAndStatus(t *testing.T) {
 		t.Fatalf("EnsureTarget again = %+v, want same ID and updated cluster", again)
 	}
 
-	if err := s.SetStatus(ctx, "web", "prod", StatusDegraded, "replica 2 failed"); err != nil {
-		t.Fatalf("SetStatus: %v", err)
-	}
-	got, err := s.Target(ctx, "web", "prod")
-	if err != nil {
-		t.Fatalf("Target: %v", err)
-	}
-	if got.Status != StatusDegraded || got.Message != "replica 2 failed" {
-		t.Fatalf("status = %s %q, want Degraded with message", got.Status, got.Message)
-	}
-
-	if err := s.SetStatus(ctx, "web", "missing", StatusSynced, ""); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("SetStatus on missing target: err = %v, want ErrNotFound", err)
-	}
 	if _, err := s.Target(ctx, "web", "missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Target on missing target: err = %v, want ErrNotFound", err)
 	}
@@ -388,6 +374,38 @@ func TestAppendRevisionNilSpecIsError(t *testing.T) {
 	}
 	if _, err := s.AppendRevision(ctx, "web", "prod", NewRevision{Commit: "c1"}); err == nil {
 		t.Fatal("AppendRevision accepted a nil Canonicaler")
+	}
+}
+
+// typedNilSpec mirrors desired.Desired: its Canonical method is safe on a nil
+// receiver and reports an error instead of dereferencing it.
+type typedNilSpec struct{}
+
+func (s *typedNilSpec) Canonical() ([]byte, error) {
+	if s == nil {
+		return nil, errors.New("nil spec")
+	}
+	return sampleSpec, nil
+}
+
+func TestAppendRevisionTypedNilSpecWritesNothing(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openTemp(t)
+	if _, err := s.EnsureTarget(ctx, "web", "prod", ""); err != nil {
+		t.Fatalf("EnsureTarget: %v", err)
+	}
+
+	var spec *typedNilSpec
+	_, err := s.AppendRevision(ctx, "web", "prod", NewRevision{Commit: "c1", RenderedSpec: spec})
+	if err == nil {
+		t.Fatal("AppendRevision accepted a typed nil Canonicaler")
+	}
+	history, err := s.Revisions(ctx, "web", "prod")
+	if err != nil {
+		t.Fatalf("Revisions: %v", err)
+	}
+	if len(history) != 0 {
+		t.Errorf("revisions = %d after typed nil spec, want 0", len(history))
 	}
 }
 
