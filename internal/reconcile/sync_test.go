@@ -412,11 +412,18 @@ func TestSyncSameTargetIsSerialized(t *testing.T) {
 	gate := make(chan struct{})
 	e.fake.gates["prod"] = gate
 	e.fake.entered = make(chan string, 2)
+	waiting := make(chan struct{}, 1)
+	e.svc.locks.onWait = func() { waiting <- struct{}{} }
 
 	first := syncAsync(e.svc, ctx, prod)
 	<-e.fake.entered // the first sync holds the target and is blocked in Apply
 
 	second := syncAsync(e.svc, ctx, prod)
+	select {
+	case <-waiting:
+	case name := <-e.fake.entered:
+		t.Fatalf("second sync reached Apply for %s while the first holds the target", name)
+	}
 	close(gate)
 
 	for _, res := range []syncResult{<-first, <-second} {

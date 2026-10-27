@@ -24,6 +24,9 @@ func (r Ref) String() string { return r.Application + "/" + r.Target }
 type locks struct {
 	mu    sync.Mutex
 	slots map[Ref]chan struct{}
+	// onWait, if set, is called once when acquire starts to block. Tests use it
+	// to know that a caller is waiting for the lock.
+	onWait func()
 }
 
 func newLocks() *locks {
@@ -40,6 +43,9 @@ func (l *locks) acquire(ctx context.Context, r Ref) (release func(), err error) 
 	case slot <- struct{}{}:
 		return func() { <-slot }, nil
 	default:
+	}
+	if l.onWait != nil {
+		l.onWait()
 	}
 	select {
 	case slot <- struct{}{}:
