@@ -46,49 +46,49 @@ func (r *Runtime) Apply(ctx context.Context, plan runtime.Plan) (runtime.Result,
 	var result runtime.Result
 	if err := applyObjects(ctx, &result, entries, desired.KindNetwork, desiredState.Networks,
 		func(n desired.Network) string { return n.Name },
-		r.createNetwork(plan), refuse[desired.Network](inPlaceUpdateError)); err != nil {
+		r.createNetwork(scope), nil); err != nil {
 		return result, err
 	}
 	if err := applyObjects(ctx, &result, entries, desired.KindConfig, desiredState.Configs,
 		func(c desired.Config) string { return c.Name },
-		r.createConfig(plan), r.updateConfig(plan)); err != nil {
+		r.createConfig(scope), r.updateConfig(scope)); err != nil {
 		return result, err
 	}
 	if err := applyObjects(ctx, &result, entries, desired.KindSecret, desiredState.Secrets,
 		func(s desired.Secret) string { return s.Name },
-		createSecret, refuse[desired.Secret](secretUpdateError)); err != nil {
+		createSecret, nil); err != nil {
 		return result, err
 	}
 	if err := applyObjects(ctx, &result, entries, desired.KindVolume, desiredState.Volumes,
 		func(v desired.Volume) string { return v.Name },
-		r.createVolume(plan), refuse[desired.Volume](inPlaceUpdateError)); err != nil {
+		r.createVolume(scope), nil); err != nil {
 		return result, err
 	}
 	return result, nil
 }
 
 // preflight checks the whole plan before the first mutation, so a plan with an
-// unsupported update is refused without creating anything. Every managed object
+// unsupported change is refused without creating anything. Every managed object
 // needs an entry, because a missing entry would otherwise be skipped silently.
 func preflight(desiredState desired.Desired, entries map[string]runtime.Entry) error {
 	if err := checkObjects(entries, desired.KindNetwork, desiredState.Networks,
-		func(n desired.Network) string { return n.Name }, inPlaceUpdateError); err != nil {
+		func(n desired.Network) string { return n.Name }, onUpdate(networkUpdateError)); err != nil {
 		return err
 	}
 	if err := checkObjects(entries, desired.KindConfig, desiredState.Configs,
-		func(c desired.Config) string { return c.Name }, configChangeError); err != nil {
+		func(c desired.Config) string { return c.Name }, onUpdate(configChangeError)); err != nil {
 		return err
 	}
 	if err := checkObjects(entries, desired.KindSecret, desiredState.Secrets,
-		func(s desired.Secret) string { return s.Name }, secretUpdateError); err != nil {
+		func(s desired.Secret) string { return s.Name }, secretCheck); err != nil {
 		return err
 	}
 	return checkObjects(entries, desired.KindVolume, desiredState.Volumes,
-		func(v desired.Volume) string { return v.Name }, inPlaceUpdateError)
+		func(v desired.Volume) string { return v.Name }, onUpdate(volumeUpdateError))
 }
 
 // checkObjects reports an error for a managed object that has no entry in the
-// plan, and runs check on every Update entry of the kind.
+// plan, and runs check on the entry of every such object.
 func checkObjects[T desired.Managed](entries map[string]runtime.Entry, kind desired.Kind, objects []T,
 	name func(T) string, check func(runtime.Entry) error,
 ) error {
@@ -101,13 +101,22 @@ func checkObjects[T desired.Managed](entries map[string]runtime.Entry, kind desi
 		if !ok {
 			return fmt.Errorf("%s: missing from the plan", key)
 		}
-		if entry.Action == runtime.Update {
-			if err := check(entry); err != nil {
-				return err
-			}
+		if err := check(entry); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// onUpdate limits check to Update entries. Create and Noop entries of a kind
+// that has no in-place update are fine.
+func onUpdate(check func(runtime.Entry) error) func(runtime.Entry) error {
+	return func(entry runtime.Entry) error {
+		if entry.Action != runtime.Update {
+			return nil
+		}
+		return check(entry)
+	}
 }
 
 // Health is not implemented yet; it arrives with service support (#18). The
@@ -119,8 +128,9 @@ func (r *Runtime) Health(context.Context, runtime.Scope) (runtime.Health, error)
 
 // applyObjects runs the plan entry of every managed object of one kind. A
 // Create calls create and records the key; an Update calls update and records
-// it. Entries marked Noop/Delete are skipped. preflight has already checked that
-// every managed object has an entry.
+// it. Entries marked Noop/Delete are skipped. A nil update means the kind has no
+// in-place update, and preflight has already refused every Update of it.
+// preflight has also checked that every managed object has an entry.
 func applyObjects[T desired.Managed](ctx context.Context, result *runtime.Result, entries map[string]runtime.Entry,
 	kind desired.Kind, objects []T, name func(T) string,
 	create func(context.Context, T) error, update func(context.Context, T, runtime.Entry) error,
@@ -138,6 +148,9 @@ func applyObjects[T desired.Managed](ctx context.Context, result *runtime.Result
 			}
 			result.Created = append(result.Created, key)
 		case runtime.Update:
+			if update == nil {
+				return fmt.Errorf("%s: update is not supported", key)
+			}
 			if err := update(ctx, object, entry); err != nil {
 				return err
 			}
@@ -147,14 +160,14 @@ func applyObjects[T desired.Managed](ctx context.Context, result *runtime.Result
 	return nil
 }
 
-func (r *Runtime) createNetwork(plan runtime.Plan) func(context.Context, desired.Network) error {
+func (r *Runtime) createNetwork(scope runtime.Scope) func(context.Context, desired.Network) error {
 	return func(ctx context.Context, network desired.Network) error {
 		_, err := r.api.NetworkCreate(ctx, network.Name, client.NetworkCreateOptions{
 			Driver:     network.Driver,
 			Options:    network.DriverOpts,
 			Internal:   network.Internal,
 			Attachable: network.Attachable,
-			Labels:     desired.MergeLabels(network.Labels, plan.Application, plan.Target),
+			Labels:     desired.MergeLabels(network.Labels, scope.Application, scope.Target),
 		})
 		if err != nil {
 			return fmt.Errorf("create network %s: %w", network.Name, err)
@@ -163,15 +176,21 @@ func (r *Runtime) createNetwork(plan runtime.Plan) func(context.Context, desired
 	}
 }
 
-func (r *Runtime) createConfig(plan runtime.Plan) func(context.Context, desired.Config) error {
+// configSpec is the spec that both ConfigCreate and ConfigUpdate send for a
+// managed config.
+func configSpec(config desired.Config, scope runtime.Scope) swarm.ConfigSpec {
+	return swarm.ConfigSpec{
+		Annotations: swarm.Annotations{
+			Name:   config.Name,
+			Labels: desired.MergeLabels(config.Labels, scope.Application, scope.Target),
+		},
+		Data: config.Data,
+	}
+}
+
+func (r *Runtime) createConfig(scope runtime.Scope) func(context.Context, desired.Config) error {
 	return func(ctx context.Context, config desired.Config) error {
-		_, err := r.api.ConfigCreate(ctx, client.ConfigCreateOptions{Spec: swarm.ConfigSpec{
-			Annotations: swarm.Annotations{
-				Name:   config.Name,
-				Labels: desired.MergeLabels(config.Labels, plan.Application, plan.Target),
-			},
-			Data: config.Data,
-		}})
+		_, err := r.api.ConfigCreate(ctx, client.ConfigCreateOptions{Spec: configSpec(config, scope)})
 		if err != nil {
 			return fmt.Errorf("create config %s: %w", config.Name, err)
 		}
@@ -184,7 +203,7 @@ func (r *Runtime) createConfig(plan runtime.Plan) func(context.Context, desired.
 // before the API is called. The version is read from ConfigInspect at the moment
 // Apply runs, so a config changed between Plan and Apply is not detected: there is
 // no protection against that change.
-func (r *Runtime) updateConfig(plan runtime.Plan) func(context.Context, desired.Config, runtime.Entry) error {
+func (r *Runtime) updateConfig(scope runtime.Scope) func(context.Context, desired.Config, runtime.Entry) error {
 	return func(ctx context.Context, config desired.Config, entry runtime.Entry) error {
 		if err := configChangeError(entry); err != nil {
 			return err
@@ -196,13 +215,7 @@ func (r *Runtime) updateConfig(plan runtime.Plan) func(context.Context, desired.
 		}
 		_, err = r.api.ConfigUpdate(ctx, config.Name, client.ConfigUpdateOptions{
 			Version: inspected.Config.Version,
-			Spec: swarm.ConfigSpec{
-				Annotations: swarm.Annotations{
-					Name:   config.Name,
-					Labels: desired.MergeLabels(config.Labels, plan.Application, plan.Target),
-				},
-				Data: config.Data,
-			},
+			Spec:    configSpec(config, scope),
 		})
 		if err != nil {
 			return fmt.Errorf("update config %s: %w", config.Name, err)
@@ -212,18 +225,19 @@ func (r *Runtime) updateConfig(plan runtime.Plan) func(context.Context, desired.
 }
 
 // createSecret always fails: the model carries no secret payload, and v0 only
-// references external secrets, so a managed one cannot be created yet.
+// references external secrets. preflight refuses a managed secret before this
+// runs, so it is only reached if that check is skipped.
 func createSecret(_ context.Context, secret desired.Secret) error {
-	return fmt.Errorf("create secret %s: managed secrets are not supported in v0", secret.Name)
+	return secretCreateError(desired.Key{Kind: desired.KindSecret, Name: secret.Name}.String())
 }
 
-func (r *Runtime) createVolume(plan runtime.Plan) func(context.Context, desired.Volume) error {
+func (r *Runtime) createVolume(scope runtime.Scope) func(context.Context, desired.Volume) error {
 	return func(ctx context.Context, volume desired.Volume) error {
 		_, err := r.api.VolumeCreate(ctx, client.VolumeCreateOptions{
 			Name:       volume.Name,
 			Driver:     volume.Driver,
 			DriverOpts: volume.DriverOpts,
-			Labels:     desired.MergeLabels(volume.Labels, plan.Application, plan.Target),
+			Labels:     desired.MergeLabels(volume.Labels, scope.Application, scope.Target),
 		})
 		if err != nil {
 			return fmt.Errorf("create volume %s: %w", volume.Name, err)
@@ -247,6 +261,23 @@ func configChangeError(entry runtime.Entry) error {
 	return nil
 }
 
+// secretCheck refuses every managed secret: v0 cannot create one, and secrets
+// have no in-place update.
+func secretCheck(entry runtime.Entry) error {
+	switch entry.Action {
+	case runtime.Create:
+		return secretCreateError(entry.Key)
+	case runtime.Update:
+		return secretUpdateError(entry)
+	default:
+		return nil
+	}
+}
+
+func secretCreateError(key string) error {
+	return fmt.Errorf("%s: managed secrets are not supported in v0", key)
+}
+
 // secretUpdateError refuses secret updates. Secrets have no in-place update in
 // v0: Docker secrets are immutable, and the diff never asks for one.
 func secretUpdateError(entry runtime.Entry) error {
@@ -254,15 +285,16 @@ func secretUpdateError(entry runtime.Entry) error {
 		entry.Key, strings.Join(entry.Changes, ", "))
 }
 
-func inPlaceUpdateError(entry runtime.Entry) error {
-	return fmt.Errorf("%s: in-place update is not supported (%s); remove the object and create it again",
+// networkUpdateError refuses a network update. v0 has no in-place network
+// update, so the network must be recreated by hand (see #23).
+func networkUpdateError(entry runtime.Entry) error {
+	return fmt.Errorf("%s: in-place update is not supported in v0 (%s); recreate the network by hand after detaching its services; see #23",
 		entry.Key, strings.Join(entry.Changes, ", "))
 }
 
-// refuse adapts a refusal to the update hook of applyObjects. preflight runs the
-// same check first, so the hook is only reached if the check was skipped.
-func refuse[T any](check func(runtime.Entry) error) func(context.Context, T, runtime.Entry) error {
-	return func(_ context.Context, _ T, entry runtime.Entry) error {
-		return check(entry)
-	}
+// volumeUpdateError refuses a volume update. v0 has no in-place volume update,
+// and recreating a volume deletes its data (see #23).
+func volumeUpdateError(entry runtime.Entry) error {
+	return fmt.Errorf("%s: in-place update is not supported in v0 (%s); recreating the volume deletes its data, so back it up and recreate it by hand; see #23",
+		entry.Key, strings.Join(entry.Changes, ", "))
 }

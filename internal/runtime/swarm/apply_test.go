@@ -371,6 +371,23 @@ func TestApplyRejectsManagedSecret(t *testing.T) {
 	}
 }
 
+func TestApplyRefusesManagedSecretBeforeAnyCreate(t *testing.T) {
+	desiredState := testDesired()
+	desiredState.Secrets = []desired.Secret{{Name: "managed", Source: "managed"}}
+	fake := &fakeAPI{}
+
+	_, err := newRuntime(fake).Apply(context.Background(), completePlan(desiredState,
+		create(desired.KindNetwork, testNetwork),
+		create(desired.KindSecret, "managed"),
+	))
+	if err == nil || !strings.Contains(err.Error(), "managed secrets are not supported") {
+		t.Fatalf("error = %v, want a managed-secret error", err)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("calls = %v, want none: the managed secret must be refused before the network is created", fake.calls)
+	}
+}
+
 func TestApplyRejectsPlanForAnotherTarget(t *testing.T) {
 	desiredState := testDesired()
 	desiredState.Target = "staging"
