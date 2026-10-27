@@ -578,3 +578,30 @@ func TestApplyFailsWhenFailedUpdateIsRolledBack(t *testing.T) {
 		t.Fatalf("error = %v, want the rollback and the task error", err)
 	}
 }
+
+// TestApplyFailsOnFailedTaskWhenReplicasRun: a failed task of the current
+// revision is an error even when the replicas that should run do run, because
+// Swarm started a replacement for it.
+func TestApplyFailsOnFailedTaskWhenReplicasRun(t *testing.T) {
+	fake := clusterWithService(nil)
+	fake.tasksFor = func(service swarm.Service) []swarm.Task {
+		tasks := fake.defaultTasks(service)
+		return append(tasks, swarm.Task{
+			ID:           service.ID + "-crashed",
+			ServiceID:    service.ID,
+			DesiredState: swarm.TaskStateShutdown,
+			Status:       swarm.TaskStatus{State: swarm.TaskStateFailed, Err: "exec: no such file or directory"},
+			Spec:         service.Spec.TaskTemplate,
+		})
+	}
+	desiredState := withService(testDesired(), "web:v1")
+	desiredState.Services[0].Replicas = 2
+	plan := completePlan(desiredState, create(desired.KindService, testService))
+	r := newRuntime(fake)
+	r.converge = fastConvergence
+
+	_, err := r.Apply(context.Background(), plan)
+	if err == nil || !strings.Contains(err.Error(), "exec: no such file or directory") {
+		t.Fatalf("error = %v, want the failed task of the current revision", err)
+	}
+}

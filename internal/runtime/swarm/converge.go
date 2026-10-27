@@ -45,12 +45,15 @@ func (r *Runtime) waitConverged(ctx context.Context, name string, after uint64) 
 				return fmt.Errorf("service %s: %s", name, strings.Join(append([]string{reason}, status.Failures...), "; "))
 			}
 		}
+		// A failed task of the current revision is an error even when a
+		// replacement runs: Apply does not hide a crash loop. Fixing it takes a new
+		// revision or removing the failed tasks by hand.
+		if len(status.Failures) > 0 {
+			return fmt.Errorf("service %s: %s", name, strings.Join(status.Failures, "; "))
+		}
 		pending = status.pending(after)
 		if pending == "" {
 			return nil
-		}
-		if len(status.Failures) > 0 {
-			return fmt.Errorf("service %s: %s", name, strings.Join(status.Failures, "; "))
 		}
 
 		select {

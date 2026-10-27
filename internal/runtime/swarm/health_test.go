@@ -220,3 +220,25 @@ func TestIsCurrentComparesSpecAndCreation(t *testing.T) {
 func fakeAPITask(service swarm.Service) swarm.Task {
 	return (&fakeAPI{}).defaultTasks(service)[0]
 }
+
+func TestHealthReportsFailedTaskWhenReplicasRun(t *testing.T) {
+	service := replicatedService(2)
+	fake := healthFake(service)
+	fake.tasks = append(fake.tasks, swarm.Task{
+		ID:           "crashed",
+		ServiceID:    service.ID,
+		DesiredState: swarm.TaskStateShutdown,
+		Status:       swarm.TaskStatus{State: swarm.TaskStateRejected, Message: "no suitable node"},
+		Spec:         service.Spec.TaskTemplate,
+	})
+
+	health, err := newRuntime(fake).Health(context.Background(), healthScope())
+	if err != nil {
+		t.Fatalf("Health: %v", err)
+	}
+	if health.Healthy || !slices.ContainsFunc(health.Problems, func(p string) bool {
+		return strings.Contains(p, "no suitable node")
+	}) {
+		t.Fatalf("health = %+v, want the rejected task reported", health)
+	}
+}
