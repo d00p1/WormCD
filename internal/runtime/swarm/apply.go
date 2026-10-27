@@ -51,7 +51,7 @@ func (r *Runtime) Apply(ctx context.Context, plan runtime.Plan) (runtime.Result,
 	}
 	if err := applyObjects(ctx, &result, entries, desired.KindConfig, desiredState.Configs,
 		func(c desired.Config) string { return c.Name },
-		r.createConfig(scope), r.updateConfig(scope)); err != nil {
+		r.createConfig(scope), r.updateConfig(scope, r.api)); err != nil {
 		return result, err
 	}
 	if err := applyObjects(ctx, &result, entries, desired.KindSecret, desiredState.Secrets,
@@ -203,13 +203,13 @@ func (r *Runtime) createConfig(scope runtime.Scope) func(context.Context, desire
 // before the API is called. The version is read from ConfigInspect at the moment
 // Apply runs, so a config changed between Plan and Apply is not detected: there is
 // no protection against that change.
-func (r *Runtime) updateConfig(scope runtime.Scope) func(context.Context, desired.Config, runtime.Entry) error {
+func (r *Runtime) updateConfig(scope runtime.Scope, reader configReader) func(context.Context, desired.Config, runtime.Entry) error {
 	return func(ctx context.Context, config desired.Config, entry runtime.Entry) error {
 		if err := configChangeError(entry); err != nil {
 			return err
 		}
 
-		inspected, err := r.api.ConfigInspect(ctx, config.Name, client.ConfigInspectOptions{})
+		inspected, err := reader.ConfigInspect(ctx, config.Name, client.ConfigInspectOptions{})
 		if err != nil {
 			return fmt.Errorf("inspect config %s: %w", config.Name, err)
 		}

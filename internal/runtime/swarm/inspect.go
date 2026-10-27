@@ -28,12 +28,18 @@ type readAPI interface {
 	VolumeList(context.Context, client.VolumeListOptions) (client.VolumeListResult, error)
 }
 
+// configReader is the read-only config call used by updateConfig to get the
+// version for ConfigUpdate. It is kept out of readAPI, because Inspect does not
+// need it, and out of writeAPI, so the write guard never sees a read method.
+type configReader interface {
+	ConfigInspect(context.Context, string, client.ConfigInspectOptions) (client.ConfigInspectResult, error)
+}
+
 // writeAPI is the subset of the Docker SDK used by Apply and Prune.
 type writeAPI interface {
 	NetworkCreate(context.Context, string, client.NetworkCreateOptions) (client.NetworkCreateResult, error)
 	NetworkRemove(context.Context, string, client.NetworkRemoveOptions) (client.NetworkRemoveResult, error)
 	ConfigCreate(context.Context, client.ConfigCreateOptions) (client.ConfigCreateResult, error)
-	ConfigInspect(context.Context, string, client.ConfigInspectOptions) (client.ConfigInspectResult, error)
 	ConfigUpdate(context.Context, string, client.ConfigUpdateOptions) (client.ConfigUpdateResult, error)
 	ConfigRemove(context.Context, string, client.ConfigRemoveOptions) (client.ConfigRemoveResult, error)
 	SecretCreate(context.Context, client.SecretCreateOptions) (client.SecretCreateResult, error)
@@ -45,6 +51,7 @@ type writeAPI interface {
 // api is the full Docker surface of the runtime. Inspect only uses readAPI.
 type api interface {
 	readAPI
+	configReader
 	writeAPI
 }
 
