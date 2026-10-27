@@ -162,7 +162,7 @@ func TestPruneSkipsServiceLeftForApply(t *testing.T) {
 		t.Fatalf("Prune: %v", err)
 	}
 	if !slices.ContainsFunc(result.Skipped, func(skip runtime.Skip) bool {
-		return skip.Key == "Service/"+testService && strings.Contains(skip.Reason, "Apply removes services")
+		return skip.Key == "Service/"+testService && strings.Contains(skip.Reason, "Apply should have removed it")
 	}) {
 		t.Fatalf("skipped = %+v, want the service with a reason", result.Skipped)
 	}

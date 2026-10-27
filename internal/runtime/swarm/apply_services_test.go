@@ -199,8 +199,6 @@ func TestApplyFailsWhenUpdatePausesOnBrokenImage(t *testing.T) {
 	}
 }
 
-// TestApplyWaitsForConvergence lets the tasks start only after a few polls. Apply
-// must keep polling and succeed once they run.
 // TestApplyFailsOnCrashLoop: a task that fails while its replacement is already
 // started is not a running task, so only the failure shows the crash loop.
 func TestApplyFailsOnCrashLoop(t *testing.T) {
@@ -252,6 +250,8 @@ func TestApplyIgnoresFailuresOfEarlierRevisions(t *testing.T) {
 	}
 }
 
+// TestApplyWaitsForConvergence lets the tasks start only after a few polls. Apply
+// must keep polling and succeed once they run.
 func TestApplyWaitsForConvergence(t *testing.T) {
 	fake := clusterWithService(nil)
 	fake.tasksFor = pendingTasks
@@ -498,4 +498,36 @@ func countTasks(tasks []swarm.Task, state swarm.TaskState, serviceID string) int
 		}
 	}
 	return n
+}
+
+// TestApplyDeleteOfVanishedServiceSucceeds: the plan was made while the service
+// existed, and another client removed it before Apply ran.
+func TestApplyDeleteOfVanishedServiceSucceeds(t *testing.T) {
+	fake := clusterWithService(nil)
+	plan := completePlan(testDesired(), deleteEntry(desired.KindService, testService))
+
+	result, err := newRuntime(fake).Apply(context.Background(), plan)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(result.Deleted) != 0 || len(fake.calls) != 0 {
+		t.Fatalf("result = %+v, calls = %v, want nothing done for a service that is gone", result, fake.calls)
+	}
+}
+
+// TestApplyDeleteRaceOnRemoveSucceeds covers a service that disappears between
+// the inspect and the remove.
+func TestApplyDeleteRaceOnRemoveSucceeds(t *testing.T) {
+	existing := runningService("web:v1")
+	fake := clusterWithService(&existing)
+	fake.vanishOnRemove = true
+	plan := completePlan(testDesired(), deleteEntry(desired.KindService, testService))
+
+	result, err := newRuntime(fake).Apply(context.Background(), plan)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(result.Deleted) != 0 {
+		t.Fatalf("deleted = %v, want none: this Apply did not remove it", result.Deleted)
+	}
 }

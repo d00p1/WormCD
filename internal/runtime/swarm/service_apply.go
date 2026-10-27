@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/d00p1/wormcd/internal/desired"
 	"github.com/d00p1/wormcd/internal/runtime"
 	"github.com/moby/moby/api/types/swarm"
@@ -80,7 +81,9 @@ func (r *Runtime) serviceSpecFor(ctx context.Context, scope runtime.Scope, servi
 }
 
 // deleteServices removes the services whose plan entry is Delete. Each one is
-// checked for ownership before it is removed.
+// checked for ownership before it is removed. A service that is already gone
+// is not an error: the plan was made before it disappeared, and the desired
+// state does not want it either.
 func (r *Runtime) deleteServices(ctx context.Context, result *runtime.Result, scope runtime.Scope, entries []runtime.Entry) error {
 	prefix := string(desired.KindService) + "/"
 	for _, entry := range entries {
@@ -89,10 +92,17 @@ func (r *Runtime) deleteServices(ctx context.Context, result *runtime.Result, sc
 			continue
 		}
 		current, err := r.inspectOwnedService(ctx, scope, name)
+		if cerrdefs.IsNotFound(err) {
+			continue
+		}
 		if err != nil {
 			return err
 		}
-		if _, err := r.api.ServiceRemove(ctx, current.ID, client.ServiceRemoveOptions{}); err != nil {
+		_, err = r.api.ServiceRemove(ctx, current.ID, client.ServiceRemoveOptions{})
+		if cerrdefs.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
 			return fmt.Errorf("remove service %s: %w", name, err)
 		}
 		result.Deleted = append(result.Deleted, entry.Key)

@@ -42,7 +42,7 @@ func (r *Runtime) Prune(ctx context.Context, scope runtime.Scope, keep runtime.S
 			continue
 		}
 		key := desired.Key{Kind: desired.KindService, Name: item.Spec.Name}.String()
-		result.Skipped = append(result.Skipped, runtime.Skip{Key: key, Reason: "not in the desired state; Apply removes services"})
+		result.Skipped = append(result.Skipped, runtime.Skip{Key: key, Reason: "still present after Apply, and not in the desired state; Apply should have removed it"})
 	}
 	referenced := serviceReferences(services.Items)
 

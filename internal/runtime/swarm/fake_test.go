@@ -35,7 +35,10 @@ type fakeAPI struct {
 	// onTaskList runs before every TaskList call, so a test can let tasks
 	// progress between two polls.
 	onTaskList func()
-	err        error
+	// vanishOnRemove makes ServiceRemove report NotFound without removing
+	// anything, as if another client removed the service first.
+	vanishOnRemove bool
+	err            error
 
 	calls []string
 }
@@ -151,7 +154,7 @@ func (f *fakeAPI) ServiceRemove(_ context.Context, id string, _ client.ServiceRe
 	if f.err != nil {
 		return client.ServiceRemoveResult{}, f.err
 	}
-	if !slices.ContainsFunc(f.services.Items, func(s swarm.Service) bool { return s.ID == id }) {
+	if f.vanishOnRemove || !slices.ContainsFunc(f.services.Items, func(s swarm.Service) bool { return s.ID == id }) {
 		return client.ServiceRemoveResult{}, cerrdefs.ErrNotFound.WithMessage("service " + id + " not found")
 	}
 	f.services.Items = slices.DeleteFunc(f.services.Items, func(s swarm.Service) bool { return s.ID == id })
