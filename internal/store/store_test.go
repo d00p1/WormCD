@@ -1,9 +1,9 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -23,7 +23,17 @@ func openTemp(t *testing.T) (*Store, string) {
 	return s, path
 }
 
-var sampleSpec = json.RawMessage(`{"application":"web","target":"prod","services":[{"name":"web","replicas":3}]}`)
+// fakeSpec is a Canonicaler that returns its bytes unchanged.
+type fakeSpec []byte
+
+func (f fakeSpec) Canonical() ([]byte, error) { return f, nil }
+
+// failingSpec is a Canonicaler whose encoding fails.
+type failingSpec struct{}
+
+func (failingSpec) Canonical() ([]byte, error) { return nil, errors.New("cannot encode") }
+
+var sampleSpec = fakeSpec(`{"application":"web","target":"prod","services":[{"name":"web","replicas":3}]}`)
 
 func TestOpenIsIdempotent(t *testing.T) {
 	ctx := context.Background()
@@ -305,9 +315,79 @@ func TestAppendRevisionRejectsInvalidSpec(t *testing.T) {
 	if _, err := s.EnsureTarget(ctx, "web", "prod", ""); err != nil {
 		t.Fatalf("EnsureTarget: %v", err)
 	}
-	_, err := s.AppendRevision(ctx, "web", "prod", NewRevision{RenderedSpec: json.RawMessage(`{"services":`)})
+	_, err := s.AppendRevision(ctx, "web", "prod", NewRevision{RenderedSpec: fakeSpec(`{"services":`)})
 	if err == nil {
 		t.Fatal("AppendRevision accepted invalid JSON")
+	}
+}
+
+func TestAppendRevisionRejectsEmptySpec(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openTemp(t)
+	if _, err := s.EnsureTarget(ctx, "web", "prod", ""); err != nil {
+		t.Fatalf("EnsureTarget: %v", err)
+	}
+	if _, err := s.AppendRevision(ctx, "web", "prod", NewRevision{RenderedSpec: fakeSpec(nil)}); err == nil {
+		t.Fatal("AppendRevision accepted empty canonical bytes")
+	}
+}
+
+func TestAppendRevisionStoresCanonicalBytes(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openTemp(t)
+	if _, err := s.EnsureTarget(ctx, "web", "prod", ""); err != nil {
+		t.Fatalf("EnsureTarget: %v", err)
+	}
+	want := []byte(`{"application":"web","services":[]}`)
+
+	number, err := s.AppendRevision(ctx, "web", "prod", NewRevision{Commit: "c1", RenderedSpec: fakeSpec(want)})
+	if err != nil {
+		t.Fatalf("AppendRevision: %v", err)
+	}
+	got, err := s.Revision(ctx, "web", "prod", number)
+	if err != nil {
+		t.Fatalf("Revision: %v", err)
+	}
+	if !bytes.Equal(got.RenderedSpec, want) {
+		t.Errorf("stored spec = %s, want %s", got.RenderedSpec, want)
+	}
+}
+
+func TestAppendRevisionCanonicalErrorWritesNothing(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openTemp(t)
+	if _, err := s.EnsureTarget(ctx, "web", "prod", ""); err != nil {
+		t.Fatalf("EnsureTarget: %v", err)
+	}
+
+	_, err := s.AppendRevision(ctx, "web", "prod", NewRevision{Commit: "c1", RenderedSpec: failingSpec{}})
+	if err == nil {
+		t.Fatal("AppendRevision ignored the Canonical error")
+	}
+	history, err := s.Revisions(ctx, "web", "prod")
+	if err != nil {
+		t.Fatalf("Revisions: %v", err)
+	}
+	if len(history) != 0 {
+		t.Errorf("revisions = %d after failed canonicalization, want 0", len(history))
+	}
+	target, err := s.Target(ctx, "web", "prod")
+	if err != nil {
+		t.Fatalf("Target: %v", err)
+	}
+	if target.LastRevision != 0 {
+		t.Errorf("last_revision = %d after failed canonicalization, want 0", target.LastRevision)
+	}
+}
+
+func TestAppendRevisionNilSpecIsError(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openTemp(t)
+	if _, err := s.EnsureTarget(ctx, "web", "prod", ""); err != nil {
+		t.Fatalf("EnsureTarget: %v", err)
+	}
+	if _, err := s.AppendRevision(ctx, "web", "prod", NewRevision{Commit: "c1"}); err == nil {
+		t.Fatal("AppendRevision accepted a nil Canonicaler")
 	}
 }
 

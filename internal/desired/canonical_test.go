@@ -68,7 +68,7 @@ func TestCanonicalDoesNotMutateInput(t *testing.T) {
 	d := shuffled()
 	want := shuffled()
 
-	if _, err := Canonical(&d); err != nil {
+	if _, err := d.Canonical(); err != nil {
 		t.Fatalf("Canonical: %v", err)
 	}
 	if !reflect.DeepEqual(d, want) {
@@ -78,14 +78,14 @@ func TestCanonicalDoesNotMutateInput(t *testing.T) {
 
 func TestCanonicalIgnoresInputOrder(t *testing.T) {
 	d := shuffled()
-	reversed, err := Canonical(&d)
+	reversed, err := d.Canonical()
 	if err != nil {
 		t.Fatalf("Canonical(shuffled): %v", err)
 	}
 
 	ordered := shuffled()
 	ordered.Sort()
-	want, err := Canonical(&ordered)
+	want, err := ordered.Canonical()
 	if err != nil {
 		t.Fatalf("Canonical(sorted): %v", err)
 	}
@@ -96,11 +96,11 @@ func TestCanonicalIgnoresInputOrder(t *testing.T) {
 
 func TestCanonicalIsRepeatable(t *testing.T) {
 	d := shuffled()
-	first, err := Canonical(&d)
+	first, err := d.Canonical()
 	if err != nil {
 		t.Fatalf("first Canonical: %v", err)
 	}
-	second, err := Canonical(&d)
+	second, err := d.Canonical()
 	if err != nil {
 		t.Fatalf("second Canonical: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestCanonicalIsRepeatable(t *testing.T) {
 
 func TestCanonicalSortsMapKeys(t *testing.T) {
 	d := shuffled()
-	raw, err := Canonical(&d)
+	raw, err := d.Canonical()
 	if err != nil {
 		t.Fatalf("Canonical: %v", err)
 	}
@@ -212,11 +212,11 @@ func TestCanonicalTieBreakIgnoresInputOrder(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			forward := tc.build(false)
 			backward := tc.build(true)
-			want, err := Canonical(&forward)
+			want, err := forward.Canonical()
 			if err != nil {
 				t.Fatalf("Canonical(forward): %v", err)
 			}
-			got, err := Canonical(&backward)
+			got, err := backward.Canonical()
 			if err != nil {
 				t.Fatalf("Canonical(backward): %v", err)
 			}
@@ -232,14 +232,14 @@ func TestCanonicalRejectsUnencodableState(t *testing.T) {
 	d.Services[1].Name = d.Services[0].Name
 	d.Services[1].Update.MaxFailureRatio = float32(math.NaN())
 
-	if _, err := Canonical(&d); err == nil {
+	if _, err := d.Canonical(); err == nil {
 		t.Fatal("Canonical(NaN) returned no error")
 	}
 }
 
 func TestCanonicalEmptyDesired(t *testing.T) {
 	var d Desired
-	if _, err := Canonical(&d); err != nil {
+	if _, err := d.Canonical(); err != nil {
 		t.Fatalf("Canonical(zero): %v", err)
 	}
 }

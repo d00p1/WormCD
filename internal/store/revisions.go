@@ -9,12 +9,18 @@ import (
 	"time"
 )
 
-// NewRevision is the input for AppendRevision. RenderedSpec is the JSON
-// document of the fully rendered desired state. Callers pass the bytes from
-// desired.Canonical so that identical renders store identical bytes.
+// Canonicaler is a rendered desired state that encodes itself canonically, so
+// identical states always store identical bytes. desired.Desired implements it.
+type Canonicaler interface {
+	Canonical() ([]byte, error)
+}
+
+// NewRevision is the input for AppendRevision. RenderedSpec is the fully
+// rendered desired state. AppendRevision stores the bytes its Canonical method
+// returns.
 type NewRevision struct {
 	Commit       string
-	RenderedSpec json.RawMessage
+	RenderedSpec Canonicaler
 	ImageDigests map[string]string
 }
 
@@ -30,7 +36,14 @@ type Revision struct {
 // AppendRevision stores rev as the next revision of the target and returns its
 // number. Numbers are sequential per target starting at 1.
 func (s *Store) AppendRevision(ctx context.Context, application, target string, rev NewRevision) (int64, error) {
-	if !json.Valid(rev.RenderedSpec) {
+	if rev.RenderedSpec == nil {
+		return 0, errors.New("store: rendered spec is nil")
+	}
+	spec, err := rev.RenderedSpec.Canonical()
+	if err != nil {
+		return 0, fmt.Errorf("store: canonicalize rendered spec: %w", err)
+	}
+	if len(spec) == 0 || !json.Valid(spec) {
 		return 0, errors.New("store: rendered spec is not valid JSON")
 	}
 	digests := rev.ImageDigests
@@ -56,7 +69,7 @@ func (s *Store) AppendRevision(ctx context.Context, application, target string, 
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO revisions (target_id, number, "commit", rendered_spec, image_digests, created_at)
 			VALUES (?, ?, ?, ?, ?, ?)`,
-			t.ID, number, rev.Commit, string(rev.RenderedSpec), string(digestsJSON), now()); err != nil {
+			t.ID, number, rev.Commit, string(spec), string(digestsJSON), now()); err != nil {
 			return err
 		}
 		_, err = tx.ExecContext(ctx, `UPDATE targets SET last_revision = ? WHERE id = ?`, number, t.ID)

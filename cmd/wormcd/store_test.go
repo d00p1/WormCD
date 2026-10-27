@@ -59,21 +59,21 @@ func TestRenderedSpecIsCanonicalAfterSort(t *testing.T) {
 		t.Fatalf("EnsureTarget: %v", err)
 	}
 
-	canonical := func(d desired.Desired) []byte {
-		raw, err := desired.Canonical(&d)
-		if err != nil {
-			t.Fatalf("Canonical: %v", err)
-		}
-		return raw
+	forward := build(false)
+	reversed := build(true)
+	forwardJSON, err := forward.Canonical()
+	if err != nil {
+		t.Fatalf("Canonical: %v", err)
+	}
+	reversedJSON, err := reversed.Canonical()
+	if err != nil {
+		t.Fatalf("Canonical: %v", err)
+	}
+	if !bytes.Equal(forwardJSON, reversedJSON) {
+		t.Fatalf("canonical specs differ:\n%s\n%s", forwardJSON, reversedJSON)
 	}
 
-	forward := canonical(build(false))
-	reversed := canonical(build(true))
-	if !bytes.Equal(forward, reversed) {
-		t.Fatalf("canonical specs differ:\n%s\n%s", forward, reversed)
-	}
-
-	number, err := st.AppendRevision(ctx, "web", "prod", store.NewRevision{Commit: "abc123", RenderedSpec: reversed})
+	number, err := st.AppendRevision(ctx, "web", "prod", store.NewRevision{Commit: "abc123", RenderedSpec: &reversed})
 	if err != nil {
 		t.Fatalf("AppendRevision: %v", err)
 	}
@@ -81,8 +81,8 @@ func TestRenderedSpecIsCanonicalAfterSort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Revision: %v", err)
 	}
-	if !bytes.Equal(rev.RenderedSpec, forward) {
-		t.Errorf("stored spec differs from canonical render:\n got: %s\nwant: %s", rev.RenderedSpec, forward)
+	if !bytes.Equal(rev.RenderedSpec, forwardJSON) {
+		t.Errorf("stored spec differs from canonical render:\n got: %s\nwant: %s", rev.RenderedSpec, forwardJSON)
 	}
 }
 
@@ -142,11 +142,7 @@ func TestRenderedRevisionRoundTrip(t *testing.T) {
 		Volumes: []desired.Volume{{Name: "data", Driver: "local"}},
 	}
 
-	spec, err := desired.Canonical(&original)
-	if err != nil {
-		t.Fatalf("Canonical: %v", err)
-	}
-	number, err := st.AppendRevision(ctx, "web", "prod", store.NewRevision{Commit: "abc123", RenderedSpec: spec})
+	number, err := st.AppendRevision(ctx, "web", "prod", store.NewRevision{Commit: "abc123", RenderedSpec: &original})
 	if err != nil {
 		t.Fatalf("AppendRevision: %v", err)
 	}

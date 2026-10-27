@@ -10,7 +10,7 @@ import (
 // produce identical bytes. The store keeps these bytes as a revision's rendered
 // spec. Canonical does not modify d. It fails if d cannot be encoded, such as a
 // NaN float, before sorting, because the sort compares elements by encoding.
-func Canonical(d *Desired) ([]byte, error) {
+func (d *Desired) Canonical() ([]byte, error) {
 	if _, err := json.Marshal(d); err != nil {
 		return nil, err
 	}
