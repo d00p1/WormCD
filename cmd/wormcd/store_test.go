@@ -1,16 +1,69 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/d00p1/wormcd/internal/desired"
 	"github.com/d00p1/wormcd/internal/store"
 )
+
+func TestRenderedSpecIsCanonicalAfterSort(t *testing.T) {
+	build := func(reverse bool) desired.Desired {
+		services := []desired.Service{
+			{
+				Name:     "web",
+				Image:    "web:1",
+				Mode:     desired.ModeReplicated,
+				Replicas: 2,
+				Networks: []desired.ServiceNetwork{{Name: "front"}, {Name: "back"}},
+				Ports: []desired.Port{
+					{Target: 80, Published: 80, Protocol: "tcp", Mode: "ingress"},
+					{Target: 53, Published: 53, Protocol: "udp", Mode: "host"},
+				},
+			},
+			{Name: "api", Image: "api:1", Mode: desired.ModeGlobal},
+		}
+		networks := []desired.Network{{Name: "front", Driver: "overlay"}, {Name: "back", Driver: "overlay"}}
+		volumes := []desired.Volume{{Name: "data", Driver: "local"}, {Name: "cache", Driver: "local"}}
+		if reverse {
+			slices.Reverse(services)
+			slices.Reverse(networks)
+			slices.Reverse(volumes)
+			slices.Reverse(services[1].Networks)
+			slices.Reverse(services[1].Ports)
+		}
+		return desired.Desired{
+			Application: "web",
+			Target:      "prod",
+			Namespace:   desired.TargetNamespace("web", "prod"),
+			Services:    services,
+			Networks:    networks,
+			Volumes:     volumes,
+		}
+	}
+
+	marshal := func(d desired.Desired) []byte {
+		d.Sort()
+		raw, err := json.Marshal(d)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return raw
+	}
+
+	forward := marshal(build(false))
+	reversed := marshal(build(true))
+	if !bytes.Equal(forward, reversed) {
+		t.Fatalf("sorted specs differ:\n%s\n%s", forward, reversed)
+	}
+}
 
 func TestRenderedRevisionRoundTrip(t *testing.T) {
 	ctx := context.Background()
