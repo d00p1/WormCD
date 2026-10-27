@@ -315,6 +315,24 @@ func TestSyncDeadlineExceededDuringApplyDegrades(t *testing.T) {
 	}
 }
 
+func TestSyncPanicInRuntimeDegrades(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	e.fake.applyPanic = "boom"
+
+	if _, err := e.svc.Sync(ctx, prod); err == nil || !strings.Contains(err.Error(), "panic: boom") {
+		t.Fatalf("Sync err = %v, want the panic as an error", err)
+	}
+	got := e.assertState(t, "prod", store.StatusDegraded, 0)
+	if !strings.Contains(got.Message, "panic: boom") {
+		t.Errorf("message = %q, want the panic", got.Message)
+	}
+	events := e.events(t, "prod")
+	if last := events[len(events)-1]; last.Type != EventSyncFailed || !strings.Contains(last.Payload, `"stage":"run"`) {
+		t.Fatalf("last event = %+v, want sync.failed at run", last)
+	}
+}
+
 // failingStore makes the writes listed in failStatuses and failEvents fail and
 // passes everything else to the real store.
 type failingStore struct {
@@ -404,8 +422,12 @@ func TestSyncStatusWriteFailureAfterRevisionDegrades(t *testing.T) {
 
 	e.setImage(t, imageV2)
 	e.svc.store = failingStore{reconcileStore: e.st, failStatuses: []store.Status{store.StatusSynced}}
-	if _, err := e.svc.Sync(ctx, prod); err == nil || !strings.Contains(err.Error(), "injected") {
+	number, err := e.svc.Sync(ctx, prod)
+	if err == nil || !strings.Contains(err.Error(), "injected") {
 		t.Fatalf("Sync err = %v, want the injected status error", err)
+	}
+	if number != 2 {
+		t.Fatalf("returned revision = %d, want 2: the revision was recorded before the status write failed", number)
 	}
 
 	if n := e.revisionCount(t, "prod"); n != 2 {
@@ -607,15 +629,14 @@ func TestStatusDoesNotMutate(t *testing.T) {
 }
 
 type syncResult struct {
-	revision int64
-	err      error
+	err error
 }
 
 func syncAsync(svc *Service, ctx context.Context, r Ref) <-chan syncResult {
 	out := make(chan syncResult, 1)
 	go func() {
-		revision, err := svc.Sync(ctx, r)
-		out <- syncResult{revision: revision, err: err}
+		_, err := svc.Sync(ctx, r)
+		out <- syncResult{err: err}
 	}()
 	return out
 }

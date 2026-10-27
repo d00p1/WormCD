@@ -22,6 +22,7 @@ const (
 	stageStart    Stage = "start"
 	stageTarget   Stage = "target"
 	stageRender   Stage = "render"
+	stageRun      Stage = "run"
 	stageRuntime  Stage = "runtime"
 	stageInspect  Stage = "inspect"
 	stageApply    Stage = "apply"

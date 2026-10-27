@@ -146,7 +146,7 @@ func (s *Service) Status(ctx context.Context, r Ref) (store.Status, error) {
 // The deadline starts once the lock is held, so waiting for another run on the
 // same target does not use up this run's time. Waiting itself honors the
 // caller's ctx.
-func (s *Service) execute(ctx context.Context, r Ref, op operation, src source) (int64, error) {
+func (s *Service) execute(ctx context.Context, r Ref, op operation, src source) (number int64, err error) {
 	if err := validateRef(r); err != nil {
 		return 0, err
 	}
@@ -158,12 +158,22 @@ func (s *Service) execute(ctx context.Context, r Ref, op operation, src source) 
 	ctx, cancel := context.WithTimeoutCause(ctx, s.syncTimeout, errSyncDeadline)
 	defer cancel()
 
+	// A panic in the runtime or in the store must not leave the target
+	// Progressing. It is recorded like any other failure of the run.
+	var last int64
+	defer func() {
+		if p := recover(); p != nil {
+			number, err = 0, s.fail(ctx, r, op, store.StatusDegraded, stageRun, last, fmt.Errorf("panic: %v", p))
+		}
+	}()
+
 	// Without the target row there is nothing to record a failure on, so this
 	// error is returned as it is.
 	target, err := s.store.EnsureTarget(ctx, r.Application, r.Target, "")
 	if err != nil {
 		return 0, runErr(op, r, err)
 	}
+	last = target.LastRevision
 	if err := s.store.SetTargetState(ctx, r.Application, r.Target, store.StatusProgressing, op.message, target.LastRevision); err != nil {
 		return 0, s.fail(ctx, r, op, store.StatusDegraded, stageProgress, target.LastRevision, err)
 	}
@@ -232,7 +242,7 @@ func (s *Service) converge(ctx context.Context, r Ref, op operation, state *desi
 		// The revision is recorded and stays. The status says so, because it
 		// could not be updated to Synced.
 		cause := fmt.Errorf("revision %d recorded but status not updated: %w", number, err)
-		return 0, s.fail(ctx, r, op, store.StatusDegraded, stageStatus, number, cause)
+		return number, s.fail(ctx, r, op, store.StatusDegraded, stageStatus, number, cause)
 	}
 	// The revision and the Synced status are already stored, so the number is
 	// returned with the error: the caller learns that the revision exists.

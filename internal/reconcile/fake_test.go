@@ -17,8 +17,9 @@ type fakeRuntime struct {
 	healthy  bool
 	problems []string
 
-	applyErr  error
-	healthErr error
+	applyErr   error
+	applyPanic any
+	healthErr  error
 
 	// gates blocks Apply for a target until the channel is closed or the context
 	// ends. entered receives the target name when Apply starts blocking.
@@ -66,7 +67,12 @@ func (f *fakeRuntime) Apply(ctx context.Context, plan runtime.Plan) (runtime.Res
 	f.mu.Lock()
 	f.applies++
 	gate := f.gates[plan.Target]
+	panicValue := f.applyPanic
 	f.mu.Unlock()
+
+	if panicValue != nil {
+		panic(panicValue)
+	}
 
 	if gate != nil {
 		f.entered <- plan.Target
