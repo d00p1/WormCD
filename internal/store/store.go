@@ -15,11 +15,11 @@ import (
 // ErrNotFound is returned when a target or revision does not exist.
 var ErrNotFound = errors.New("store: not found")
 
-// Status is the observed state of a target. Only StatusUnknown is written so
-// far; the rest belong to status reporting.
+// Status is the observed state of a target. Other statuses are added with
+// sync (#20).
 type Status string
 
-// StatusUnknown is the status of a target that has not been observed yet.
+// StatusUnknown is the starting status of every target, before it is observed.
 const StatusUnknown Status = "Unknown"
 
 // Store is a SQLite-backed store. It is safe for concurrent use.
