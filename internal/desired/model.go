@@ -242,19 +242,19 @@ func (d *Desired) Sort() error {
 	if err != nil {
 		return err
 	}
-	networks, err := planSort(d.Networks, KindNetwork, func(n Network) string { return n.Name })
+	networks, err := planNetworks(d.Networks)
 	if err != nil {
 		return err
 	}
-	configs, err := planSort(d.Configs, KindConfig, func(c Config) string { return c.Name })
+	configs, err := planConfigs(d.Configs)
 	if err != nil {
 		return err
 	}
-	secrets, err := planSort(d.Secrets, KindSecret, func(s Secret) string { return s.Name })
+	secrets, err := planSecrets(d.Secrets)
 	if err != nil {
 		return err
 	}
-	volumes, err := planSort(d.Volumes, KindVolume, func(v Volume) string { return v.Name })
+	volumes, err := planVolumes(d.Volumes)
 	if err != nil {
 		return err
 	}
@@ -281,34 +281,60 @@ func SortServices(services []Service) error {
 
 // SortNetworks orders networks by name.
 func SortNetworks(networks []Network) error {
-	return sortByName(networks, KindNetwork, func(n Network) string { return n.Name })
+	sortNetworks, err := planNetworks(networks)
+	if err != nil {
+		return err
+	}
+	sortNetworks()
+	return nil
 }
 
 // SortConfigs orders configs by name.
 func SortConfigs(configs []Config) error {
-	return sortByName(configs, KindConfig, func(c Config) string { return c.Name })
+	sortConfigs, err := planConfigs(configs)
+	if err != nil {
+		return err
+	}
+	sortConfigs()
+	return nil
 }
 
 // SortSecrets orders secrets by name.
 func SortSecrets(secrets []Secret) error {
-	return sortByName(secrets, KindSecret, func(s Secret) string { return s.Name })
+	sortSecrets, err := planSecrets(secrets)
+	if err != nil {
+		return err
+	}
+	sortSecrets()
+	return nil
 }
 
 // SortVolumes orders volumes by name.
 func SortVolumes(volumes []Volume) error {
-	return sortByName(volumes, KindVolume, func(v Volume) string { return v.Name })
-}
-
-// sortByName orders elems by name and breaks ties on the JSON encoding of the
-// whole element. It fails without reordering elems if a tied element cannot be
-// encoded.
-func sortByName[T any](elems []T, kind Kind, name func(T) string) error {
-	sortElems, err := planSort(elems, kind, name)
+	sortVolumes, err := planVolumes(volumes)
 	if err != nil {
 		return err
 	}
-	sortElems()
+	sortVolumes()
 	return nil
+}
+
+// planNetworks, planConfigs, planSecrets and planVolumes are planSort for
+// each kind, named by its Name field. Sort and the Sort* functions share them.
+func planNetworks(networks []Network) (func(), error) {
+	return planSort(networks, KindNetwork, func(n Network) string { return n.Name })
+}
+
+func planConfigs(configs []Config) (func(), error) {
+	return planSort(configs, KindConfig, func(c Config) string { return c.Name })
+}
+
+func planSecrets(secrets []Secret) (func(), error) {
+	return planSort(secrets, KindSecret, func(s Secret) string { return s.Name })
+}
+
+func planVolumes(volumes []Volume) (func(), error) {
+	return planSort(volumes, KindVolume, func(v Volume) string { return v.Name })
 }
 
 // planSort encodes the elements whose names are shared, the only ones the
