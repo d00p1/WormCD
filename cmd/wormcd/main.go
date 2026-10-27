@@ -89,7 +89,11 @@ func runServer(args []string) error {
 		if err != nil {
 			return err
 		}
-		defer func() { _ = st.Close() }()
+		defer func() {
+			if err := st.Close(); err != nil {
+				slog.Error("close store", "path", *data, "err", err)
+			}
+		}()
 		slog.Info("store opened", "path", *data)
 	}
 
