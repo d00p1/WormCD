@@ -268,6 +268,71 @@ func TestSyncApplyErrorDegradesAndKeepsLastRevision(t *testing.T) {
 	}
 }
 
+func TestSyncCanceledDuringApplyDegrades(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	e.fake.gates["prod"] = make(chan struct{}) // never closed: Apply ends with ctx
+	e.fake.entered = make(chan string, 1)
+
+	run, cancel := context.WithCancel(ctx)
+	done := syncAsync(e.svc, run, prod)
+	<-e.fake.entered
+	cancel()
+
+	res := <-done
+	if !errors.Is(res.err, context.Canceled) {
+		t.Fatalf("Sync err = %v, want context.Canceled", res.err)
+	}
+	got := e.assertState(t, "prod", store.StatusDegraded, 0)
+	if !strings.Contains(got.Message, "apply") {
+		t.Errorf("message = %q, want it to name the apply stage", got.Message)
+	}
+	events := e.events(t, "prod")
+	if last := events[len(events)-1]; last.Type != EventSyncFailed || !strings.Contains(last.Payload, `"stage":"apply"`) {
+		t.Fatalf("last event = %+v, want sync.failed at apply", last)
+	}
+}
+
+// failingStore makes SetTargetState fail for one status and passes everything
+// else to the real store.
+type failingStore struct {
+	reconcileStore
+	failStatus store.Status
+}
+
+func (f failingStore) SetTargetState(ctx context.Context, application, target string, status store.Status, message string, lastRevision int64) error {
+	if status == f.failStatus {
+		return errors.New("injected: set status")
+	}
+	return f.reconcileStore.SetTargetState(ctx, application, target, status, message, lastRevision)
+}
+
+func TestSyncStatusWriteFailureAfterRevisionDegrades(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	if _, err := e.svc.Sync(ctx, prod); err != nil {
+		t.Fatalf("first Sync: %v", err)
+	}
+
+	e.setImage(t, imageV2)
+	e.svc.store = failingStore{reconcileStore: e.st, failStatus: store.StatusSynced}
+	if _, err := e.svc.Sync(ctx, prod); err == nil || !strings.Contains(err.Error(), "injected") {
+		t.Fatalf("Sync err = %v, want the injected status error", err)
+	}
+
+	if n := e.revisionCount(t, "prod"); n != 2 {
+		t.Fatalf("revisions = %d, want 2: the revision was recorded before the status write failed", n)
+	}
+	got := e.assertState(t, "prod", store.StatusDegraded, 2)
+	if !strings.Contains(got.Message, "revision 2 recorded but status not updated") {
+		t.Errorf("message = %q, want it to say the revision is recorded", got.Message)
+	}
+	events := e.events(t, "prod")
+	if last := events[len(events)-1]; last.Type != EventSyncFailed || !strings.Contains(last.Payload, `"stage":"status"`) {
+		t.Fatalf("last event = %+v, want sync.failed at status", last)
+	}
+}
+
 func TestSyncUnhealthyDegradesWithoutRevision(t *testing.T) {
 	ctx := context.Background()
 	e := newEnv(t)

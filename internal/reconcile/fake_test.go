@@ -20,8 +20,8 @@ type fakeRuntime struct {
 	applyErr  error
 	healthErr error
 
-	// gates blocks Apply for a target until the channel is closed. entered
-	// receives the target name when Apply starts blocking.
+	// gates blocks Apply for a target until the channel is closed or the context
+	// ends. entered receives the target name when Apply starts blocking.
 	gates   map[string]chan struct{}
 	entered chan string
 
@@ -62,7 +62,7 @@ func (f *fakeRuntime) Inspect(_ context.Context, scope runtime.Scope) (runtime.O
 	return obs, nil
 }
 
-func (f *fakeRuntime) Apply(_ context.Context, plan runtime.Plan) (runtime.Result, error) {
+func (f *fakeRuntime) Apply(ctx context.Context, plan runtime.Plan) (runtime.Result, error) {
 	f.mu.Lock()
 	f.applies++
 	gate := f.gates[plan.Target]
@@ -70,7 +70,11 @@ func (f *fakeRuntime) Apply(_ context.Context, plan runtime.Plan) (runtime.Resul
 
 	if gate != nil {
 		f.entered <- plan.Target
-		<-gate
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return runtime.Result{}, ctx.Err()
+		}
 	}
 
 	f.mu.Lock()

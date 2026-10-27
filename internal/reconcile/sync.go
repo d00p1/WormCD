@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/d00p1/wormcd/internal/desired"
 	"github.com/d00p1/wormcd/internal/manifest"
@@ -16,10 +17,25 @@ import (
 // the implementation: the composition root injects it (ADR-0003).
 type RuntimeFactory func(ctx context.Context, cluster string) (runtime.Runtime, error)
 
+// reconcileStore is the part of *store.Store that reconcile uses. Tests wrap it
+// to make individual writes fail.
+type reconcileStore interface {
+	EnsureTarget(ctx context.Context, application, target, cluster string) (store.Target, error)
+	SetTargetState(ctx context.Context, application, target string, status store.Status, message string, lastRevision int64) error
+	AddEvent(ctx context.Context, e store.Event) error
+	AppendRevision(ctx context.Context, application, target string, rev store.NewRevision) (int64, error)
+	Revision(ctx context.Context, application, target string, number int64) (store.Revision, error)
+}
+
+// finishTimeout bounds the writes that record a failed run. They ignore
+// cancellation of the run, which is often the reason for the failure, but must
+// not hang on a stuck database.
+const finishTimeout = 10 * time.Second
+
 // Service runs sync, rollback and status for targets. Operations on one target
 // are serialized in this process (ADR-0007); different targets run in parallel.
 type Service struct {
-	store    *store.Store
+	store    reconcileStore
 	runtimes RuntimeFactory
 	root     string
 	locks    *locks
@@ -124,7 +140,7 @@ func (s *Service) execute(ctx context.Context, r Ref, op operation, src source) 
 		return 0, fmt.Errorf("%s %s: %w", op.kind, r, err)
 	}
 	if err := s.event(ctx, r, op.revision, op.started, op.message, "", ""); err != nil {
-		return 0, fmt.Errorf("%s %s: %w", op.kind, r, err)
+		return 0, s.fail(ctx, r, op, store.StatusDegraded, stageStart, target.LastRevision, err)
 	}
 
 	state, cluster, err := src(ctx, target)
@@ -135,10 +151,11 @@ func (s *Service) execute(ctx context.Context, r Ref, op operation, src source) 
 	// The cluster is known only after the manifest is rendered, so a first sync
 	// writes it here.
 	if cluster != target.Cluster {
-		target, err = s.store.EnsureTarget(ctx, r.Application, r.Target, cluster)
+		updated, err := s.store.EnsureTarget(ctx, r.Application, r.Target, cluster)
 		if err != nil {
-			return 0, fmt.Errorf("%s %s: %w", op.kind, r, err)
+			return 0, s.fail(ctx, r, op, store.StatusDegraded, stageTarget, target.LastRevision, err)
 		}
+		target = updated
 	}
 
 	rt, err := s.runtimes(ctx, cluster)
@@ -186,7 +203,10 @@ func (s *Service) converge(ctx context.Context, r Ref, op operation, state *desi
 		return 0, s.fail(ctx, r, op, store.StatusDegraded, stageRevision, last, err)
 	}
 	if err := s.store.SetTargetState(ctx, r.Application, r.Target, store.StatusSynced, "", number); err != nil {
-		return 0, fmt.Errorf("%s %s: %w", op.kind, r, err)
+		// The revision is recorded and stays. The status says so, because it
+		// could not be updated to Synced.
+		cause := fmt.Errorf("revision %d recorded but status not updated: %w", number, err)
+		return 0, s.fail(ctx, r, op, store.StatusDegraded, stageStatus, number, cause)
 	}
 	if err := s.event(ctx, r, number, op.succeeded, op.successMessage(number), "", ""); err != nil {
 		return 0, fmt.Errorf("%s %s: %w", op.kind, r, err)
@@ -215,8 +235,12 @@ func (s *Service) render(ctx context.Context, r Ref) (*desired.Desired, string, 
 // so that a failed record is not lost.
 func (s *Service) fail(ctx context.Context, r Ref, op operation, status store.Status, stage Stage, last int64, cause error) error {
 	err := fmt.Errorf("%s %s: %s: %w", op.kind, r, stage, cause)
-	setErr := s.store.SetTargetState(ctx, r.Application, r.Target, status, err.Error(), last)
-	evErr := s.event(ctx, r, op.revision, op.failed, fmt.Sprintf("%s failed at %s", op.kind, stage), stage, cause.Error())
+	// The run may have failed because ctx was canceled, so the failure is
+	// written with a context that ignores cancellation.
+	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finishTimeout)
+	defer cancel()
+	setErr := s.store.SetTargetState(fctx, r.Application, r.Target, status, err.Error(), last)
+	evErr := s.event(fctx, r, op.revision, op.failed, fmt.Sprintf("%s failed at %s", op.kind, stage), stage, cause.Error())
 	return errors.Join(err, setErr, evErr)
 }
 
