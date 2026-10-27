@@ -1,5 +1,7 @@
 package runtime
 
+import "github.com/d00p1/wormcd/internal/desired"
+
 // Action is what apply must do with one object.
 type Action string
 
@@ -36,6 +38,10 @@ type Plan struct {
 	Namespace   string  `json:"namespace"`
 	Summary     Summary `json:"summary"`
 	Entries     []Entry `json:"entries"`
+
+	// Desired carries the object contents Apply needs (config data, labels,
+	// driver options). It is not part of the plan's JSON output.
+	Desired desired.Desired `json:"-"`
 }
 
 // HasChanges reports whether applying the plan would mutate the cluster.

@@ -198,6 +198,40 @@ configs:
 	}
 }
 
+func TestConfigLabelChangeKeepsName(t *testing.T) {
+	compose := func(team string) string {
+		return `services:
+  web:
+    image: ghcr.io/d00p1/web:v1
+    configs:
+      - source: app
+configs:
+  app:
+    file: app.conf
+    labels:
+      team: ` + team + `
+`
+	}
+	firstPath := writeApp(t, "", map[string]string{
+		"compose.yaml": compose("a"),
+		"app.conf":     "one",
+	})
+	secondPath := writeApp(t, "", map[string]string{
+		"compose.yaml": compose("b"),
+		"app.conf":     "one",
+	})
+
+	first := load(t, firstPath, "")
+	second := load(t, secondPath, "")
+
+	if first.Configs[0].Name != second.Configs[0].Name {
+		t.Fatalf("config name changed with labels: %q -> %q", first.Configs[0].Name, second.Configs[0].Name)
+	}
+	if got := second.Configs[0].Labels["team"]; got != "b" {
+		t.Errorf("labels[team] = %q, want %q", got, "b")
+	}
+}
+
 func TestLoadRejectsUnsupportedField(t *testing.T) {
 	path := writeApp(t, "", map[string]string{
 		"compose.yaml": `services:

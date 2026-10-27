@@ -16,6 +16,7 @@ func Diff(desiredState *desired.Desired, observedState runtime.Observed) runtime
 		Target:      desiredState.Target,
 		Namespace:   desiredState.Namespace,
 		Entries:     make([]runtime.Entry, 0, 16),
+		Desired:     *desiredState,
 	}
 
 	// Entries are grouped in dependency order, matching apply. Apply must
@@ -30,7 +31,8 @@ func Diff(desiredState *desired.Desired, observedState runtime.Observed) runtime
 	return plan
 }
 
-// objectKind groups everything the diff needs for one kind of object.
+// objectKind groups everything the diff needs for one kind of object. A nil
+// changes means the kind has no in-place updates: a matching name is a match.
 type objectKind[T desired.Managed] struct {
 	kind    desired.Kind
 	name    func(T) string
@@ -43,15 +45,19 @@ var (
 		name:    networkName,
 		changes: networkChanges,
 	}
+	// Config names carry a hash of the content, so a matching name already means
+	// matching data. Labels are the one thing Docker can change in place
+	// (ConfigUpdate), so they are the only config changes.
 	configKind = objectKind[desired.Config]{
 		kind:    desired.KindConfig,
 		name:    configName,
 		changes: configChanges,
 	}
+	// Managed secrets cannot be created in v0 (see swarm.Apply), so there is
+	// nothing to compare.
 	secretKind = objectKind[desired.Secret]{
-		kind:    desired.KindSecret,
-		name:    secretName,
-		changes: secretChanges,
+		kind: desired.KindSecret,
+		name: secretName,
 	}
 	volumeKind = objectKind[desired.Volume]{
 		kind:    desired.KindVolume,
@@ -102,7 +108,9 @@ func diffObjects[T desired.Managed](plan *runtime.Plan, objectType objectKind[T]
 		}
 		switch {
 		case inDesired && inObserved:
-			entry.Changes = objectType.changes(desiredObject, observedObject)
+			if objectType.changes != nil {
+				entry.Changes = objectType.changes(desiredObject, observedObject)
+			}
 			if len(entry.Changes) == 0 {
 				entry.Action = runtime.Noop
 			} else {
@@ -141,12 +149,6 @@ func networkChanges(desiredNetwork, observedNetwork desired.Network) []string {
 func configChanges(desiredConfig, observedConfig desired.Config) []string {
 	var out []string
 	addMapChanges(&out, "labels", desiredConfig.Labels, observedConfig.Labels)
-	return out
-}
-
-func secretChanges(desiredSecret, observedSecret desired.Secret) []string {
-	var out []string
-	addMapChanges(&out, "labels", desiredSecret.Labels, observedSecret.Labels)
 	return out
 }
 
