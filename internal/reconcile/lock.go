@@ -18,9 +18,10 @@ func (r Ref) String() string { return r.Application + "/" + r.Target }
 // target has its own one-slot semaphore, so different targets never wait for
 // each other. Waiting honors ctx.
 //
-// The map gets one entry per target and is never pruned. The number of targets
-// is bounded and checked up front (ADR-0007), so the registry cannot grow
-// without limit.
+// The map gets one entry per distinct app/target that ran a sync or rollback in
+// this process, and entries are never removed. The bound is the number of
+// targets declared in the manifests. Render checks each manifest, but nothing
+// here limits that count.
 type locks struct {
 	mu    sync.Mutex
 	slots map[Ref]chan struct{}
