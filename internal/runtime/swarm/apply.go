@@ -190,13 +190,6 @@ func onUpdate(check func(runtime.Entry) error) func(runtime.Entry) error {
 	}
 }
 
-// Health is not implemented yet; it arrives with service support (#18). The
-// result is explicit about that, so the core can report the target as not
-// converged instead of failing.
-func (r *Runtime) Health(context.Context, runtime.Scope) (runtime.Health, error) {
-	return runtime.Health{Healthy: false, Problems: []string{"not implemented (see #18)"}}, nil
-}
-
 // applyObjects runs the plan entry of every managed object of one kind. A
 // Create calls create and records the key; an Update calls update and records
 // it. Entries marked Noop/Delete are skipped. A nil update means the kind has no

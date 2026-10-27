@@ -401,16 +401,3 @@ func TestApplyStopsOnAPIError(t *testing.T) {
 		t.Fatalf("calls = %v, want the volume not to be attempted after the failure", fake.calls)
 	}
 }
-
-func TestHealthReportsNotImplementedAsUnhealthy(t *testing.T) {
-	health, err := newRuntime(&fakeAPI{}).Health(context.Background(), runtime.Scope{Application: "web", Target: "prod"})
-	if err != nil {
-		t.Fatalf("Health: %v", err)
-	}
-	if health.Healthy {
-		t.Fatal("Health reported healthy, want not healthy until services are implemented")
-	}
-	if !slices.Equal(health.Problems, []string{"not implemented (see #18)"}) {
-		t.Fatalf("problems = %v, want the not-implemented problem", health.Problems)
-	}
-}

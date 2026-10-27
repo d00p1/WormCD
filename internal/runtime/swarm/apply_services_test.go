@@ -195,6 +195,56 @@ func TestApplyFailsWhenUpdatePausesOnBrokenImage(t *testing.T) {
 
 // TestApplyWaitsForConvergence lets the tasks start only after a few polls. Apply
 // must keep polling and succeed once they run.
+// TestApplyFailsOnCrashLoop: a task that fails while its replacement is already
+// started is not a running task, so only the failure shows the crash loop.
+func TestApplyFailsOnCrashLoop(t *testing.T) {
+	fake := clusterWithService(nil)
+	fake.tasksFor = func(service swarm.Service) []swarm.Task {
+		return []swarm.Task{{
+			ID:           service.ID + "-task-0",
+			ServiceID:    service.ID,
+			DesiredState: swarm.TaskStateShutdown,
+			Status:       swarm.TaskStatus{State: swarm.TaskStateFailed, Err: "exec: no such file or directory"},
+		}}
+	}
+	plan := completePlan(withService(testDesired(), "web:v1"), create(desired.KindService, testService))
+	r := newRuntime(fake)
+	r.converge = fastConvergence
+
+	_, err := r.Apply(context.Background(), plan)
+	if err == nil || !strings.Contains(err.Error(), "exec: no such file or directory") {
+		t.Fatalf("error = %v, want the crash-loop failure", err)
+	}
+}
+
+// TestApplyIgnoresFailuresOfEarlierRevisions: a failed task created before the
+// last update belongs to an older revision, so it must not fail the wait.
+func TestApplyIgnoresFailuresOfEarlierRevisions(t *testing.T) {
+	existing := runningService("web:v1")
+	existing.Spec.Mode = swarm.ServiceMode{Replicated: &swarm.ReplicatedService{Replicas: uint64Ptr(2)}}
+	fake := clusterWithService(&existing)
+	fake.tasksFor = func(service swarm.Service) []swarm.Task {
+		tasks := fake.defaultTasks(service)[:1]
+		return append(tasks, swarm.Task{
+			ID:           service.ID + "-old",
+			ServiceID:    service.ID,
+			DesiredState: swarm.TaskStateShutdown,
+			Status:       swarm.TaskStatus{State: swarm.TaskStateFailed, Err: "old revision"},
+			Meta:         swarm.Meta{CreatedAt: time.Now().Add(-time.Hour)},
+		})
+	}
+	desiredState := withService(testDesired(), "web:v1")
+	desiredState.Services[0].Replicas = 2
+	plan := completePlan(desiredState, updateEntry("replicas"))
+	r := newRuntime(fake)
+	r.converge = convergence{Interval: time.Millisecond, Timeout: 20 * time.Millisecond}
+
+	_, err := r.Apply(context.Background(), plan)
+	if err == nil || strings.Contains(err.Error(), "old revision") || !strings.Contains(err.Error(), "not converged (1 of 2 tasks running)") {
+		t.Fatalf("error = %v, want a timeout that does not mention the old revision", err)
+	}
+}
+
 func TestApplyWaitsForConvergence(t *testing.T) {
 	fake := clusterWithService(nil)
 	fake.tasksFor = pendingTasks

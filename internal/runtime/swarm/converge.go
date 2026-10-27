@@ -26,9 +26,10 @@ type serviceStatus struct {
 	Running       uint64
 	// Failures are failed or rejected tasks that are meant to run.
 	Failures []string
-	// RevisionFailures are failed tasks of the image the service runs now,
-	// whatever their desired state. Swarm replaces a failed task at once and
-	// marks it shut down, so a crash loop never shows as a failed running task.
+	// RevisionFailures are failed tasks created since the service's last
+	// update, whatever their desired state. Swarm replaces a failed task at once
+	// and marks it shut down, so a crash loop never shows as a failed running
+	// task.
 	RevisionFailures []string
 }
 
@@ -38,10 +39,25 @@ func (s serviceStatus) pending(after uint64) string {
 	switch {
 	case s.Version <= after:
 		return "update not applied yet"
+	case s.Update == swarm.UpdateStateUpdating:
+		return "update in progress"
 	case s.Update != "" && s.Update != swarm.UpdateStateCompleted:
 		return "update " + string(s.Update)
 	}
 	return s.shortfall()
+}
+
+// problems lists why the service is not healthy right now: its failures, and
+// whatever keeps it from running its desired tasks.
+func (s serviceStatus) problems() []string {
+	out := s.failures()
+	if s.Update == swarm.UpdateStateUpdating {
+		out = append(out, "update in progress")
+	}
+	if reason := s.shortfall(); reason != "" {
+		out = append(out, reason)
+	}
+	return out
 }
 
 // failures lists the update and task errors that stop a service from
@@ -105,10 +121,6 @@ func (r *Runtime) readStatus(ctx context.Context, service swarm.Service) (servic
 	}
 	status.Desired, status.DesiredKnown = desiredTasks(service)
 
-	image := ""
-	if containerSpec := service.Spec.TaskTemplate.ContainerSpec; containerSpec != nil {
-		image = containerSpec.Image
-	}
 	tasks, err := r.api.TaskList(ctx, client.TaskListOptions{
 		Filters: client.Filters{}.Add("service", service.ID),
 	})
@@ -122,7 +134,7 @@ func (r *Runtime) readStatus(ctx context.Context, service swarm.Service) (servic
 			status.Running++
 		case failed && task.DesiredState == swarm.TaskStateRunning:
 			status.Failures = append(status.Failures, taskFailure(task))
-		case failed && taskImage(task) == image:
+		case failed && !task.CreatedAt.Before(service.UpdatedAt):
 			status.RevisionFailures = append(status.RevisionFailures, taskFailure(task))
 		}
 	}
@@ -143,13 +155,6 @@ func desiredTasks(service swarm.Service) (uint64, bool) {
 		return desired.DefaultReplicas, true
 	}
 	return 0, false
-}
-
-func taskImage(task swarm.Task) string {
-	if containerSpec := task.Spec.ContainerSpec; containerSpec != nil {
-		return containerSpec.Image
-	}
-	return ""
 }
 
 func taskFailure(task swarm.Task) string {

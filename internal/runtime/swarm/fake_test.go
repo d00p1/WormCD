@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/api/types/swarm"
@@ -17,8 +18,8 @@ import (
 // Every mutating call is recorded in calls; err is returned by every call.
 //
 // Tasks are created by a service create or update. tasksFor decides what they
-// look like; by default every desired task runs. An update that leaves a failed
-// task pauses, as Swarm does.
+// look like; by default every desired task runs. A failed task that is meant to
+// run pauses the update, as Swarm does.
 type fakeAPI struct {
 	services client.ServiceListResult
 	networks client.NetworkListResult
@@ -154,15 +155,22 @@ func (f *fakeAPI) startTasks(service swarm.Service) {
 	if f.tasksFor != nil {
 		tasks = f.tasksFor(service)
 	}
+	now := time.Now()
+	for i := range tasks {
+		if tasks[i].CreatedAt.IsZero() {
+			tasks[i].CreatedAt = now
+		}
+	}
 	f.tasks = append(f.tasks, tasks...)
 
 	for i, item := range f.services.Items {
 		if item.ID != service.ID {
 			continue
 		}
+		item.UpdatedAt = now
 		item.UpdateStatus = &swarm.UpdateStatus{State: swarm.UpdateStateCompleted}
 		for _, task := range tasks {
-			if task.Status.State == swarm.TaskStateFailed {
+			if task.Status.State == swarm.TaskStateFailed && task.DesiredState == swarm.TaskStateRunning {
 				item.UpdateStatus = &swarm.UpdateStatus{State: swarm.UpdateStatePaused, Message: "task failed"}
 			}
 		}
