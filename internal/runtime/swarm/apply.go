@@ -11,18 +11,22 @@ import (
 	"github.com/moby/moby/client"
 )
 
-// Apply creates the networks, configs, secrets and volumes that a plan asks
-// for, in that order. Entries with Noop or Delete actions do nothing here:
-// deletions belong to Prune, which runs after the services have moved off the
-// old objects.
+// Apply creates the networks, configs, secrets, volumes and services that a
+// plan asks for, in that order, and updates the services and configs in place.
+// Services are created or updated only after their networks, configs, secrets
+// and volumes exist. The services a plan deletes are removed before the other
+// service changes. Configs, secrets and networks that an old service still
+// referenced are left to Prune, which runs after the services have moved off
+// them. A service is reported as converged only once it runs its desired tasks
+// (see converge.go).
 //
 // Configs change in place only by their labels, through ConfigUpdate: Docker
 // fixes a config's data, so a content change arrives as a new name (the hash is
 // part of it). Secrets have no in-place update in v0, so an Update on them is an
-// error. Service changes are not applied until #18.
+// error.
 func (r *Runtime) Apply(ctx context.Context, plan runtime.Plan) (runtime.Result, error) {
 	desiredState := plan.Desired
-	scope := runtime.Scope{Application: desiredState.Application, Target: desiredState.Target}
+	scope := scopeOf(desiredState)
 	if err := validateScope(scope); err != nil {
 		return runtime.Result{}, err
 	}
@@ -34,9 +38,6 @@ func (r *Runtime) Apply(ctx context.Context, plan runtime.Plan) (runtime.Result,
 	entries := make(map[string]runtime.Entry, len(plan.Entries))
 	for _, entry := range plan.Entries {
 		entries[entry.Key] = entry
-		if isService(entry.Key) && entry.Action != runtime.Noop {
-			return runtime.Result{}, fmt.Errorf("%s: %s is not implemented yet (see #18)", entry.Key, entry.Action)
-		}
 	}
 
 	if err := preflight(desiredState, entries); err != nil {
@@ -51,7 +52,7 @@ func (r *Runtime) Apply(ctx context.Context, plan runtime.Plan) (runtime.Result,
 	}
 	if err := applyObjects(ctx, &result, entries, desired.KindConfig, desiredState.Configs,
 		func(c desired.Config) string { return c.Name },
-		r.createConfig(scope), r.updateConfig(scope, r.api)); err != nil {
+		r.createConfig(scope), r.updateConfig(scope)); err != nil {
 		return result, err
 	}
 	if err := applyObjects(ctx, &result, entries, desired.KindSecret, desiredState.Secrets,
@@ -64,7 +65,20 @@ func (r *Runtime) Apply(ctx context.Context, plan runtime.Plan) (runtime.Result,
 		r.createVolume(scope), nil); err != nil {
 		return result, err
 	}
+	if err := r.deleteServices(ctx, &result, scope, plan.Entries); err != nil {
+		return result, err
+	}
+	if err := applyObjects(ctx, &result, entries, desired.KindService, desiredState.Services,
+		func(s desired.Service) string { return s.Name },
+		r.createService(scope), r.updateService(scope)); err != nil {
+		return result, err
+	}
 	return result, nil
+}
+
+// scopeOf is the target a desired state belongs to.
+func scopeOf(desiredState desired.Desired) runtime.Scope {
+	return runtime.Scope{Application: desiredState.Application, Target: desiredState.Target}
 }
 
 // preflight checks the whole plan before the first mutation, so a plan with an
@@ -83,8 +97,11 @@ func preflight(desiredState desired.Desired, entries map[string]runtime.Entry) e
 		func(s desired.Secret) string { return s.Name }, secretCheck); err != nil {
 		return err
 	}
-	return checkObjects(entries, desired.KindVolume, desiredState.Volumes,
-		func(v desired.Volume) string { return v.Name }, onUpdate(volumeUpdateError))
+	if err := checkObjects(entries, desired.KindVolume, desiredState.Volumes,
+		func(v desired.Volume) string { return v.Name }, onUpdate(volumeUpdateError)); err != nil {
+		return err
+	}
+	return preflightServices(desiredState, entries)
 }
 
 // checkObjects reports an error for a managed object that has no entry in the
@@ -117,13 +134,6 @@ func onUpdate(check func(runtime.Entry) error) func(runtime.Entry) error {
 		}
 		return check(entry)
 	}
-}
-
-// Health is not implemented yet; it arrives with service support (#18). The
-// result is explicit about that, so the core can report the target as not
-// converged instead of failing.
-func (r *Runtime) Health(context.Context, runtime.Scope) (runtime.Health, error) {
-	return runtime.Health{Healthy: false, Problems: []string{"not implemented (see #18)"}}, nil
 }
 
 // applyObjects runs the plan entry of every managed object of one kind. A
@@ -203,13 +213,13 @@ func (r *Runtime) createConfig(scope runtime.Scope) func(context.Context, desire
 // before the API is called. The version is read from ConfigInspect at the moment
 // Apply runs, so a config changed between Plan and Apply is not detected: there is
 // no protection against that change.
-func (r *Runtime) updateConfig(scope runtime.Scope, reader configReader) func(context.Context, desired.Config, runtime.Entry) error {
+func (r *Runtime) updateConfig(scope runtime.Scope) func(context.Context, desired.Config, runtime.Entry) error {
 	return func(ctx context.Context, config desired.Config, entry runtime.Entry) error {
 		if err := configChangeError(entry); err != nil {
 			return err
 		}
 
-		inspected, err := reader.ConfigInspect(ctx, config.Name, client.ConfigInspectOptions{})
+		inspected, err := r.api.ConfigInspect(ctx, config.Name, client.ConfigInspectOptions{})
 		if err != nil {
 			return fmt.Errorf("inspect config %s: %w", config.Name, err)
 		}
@@ -244,10 +254,6 @@ func (r *Runtime) createVolume(scope runtime.Scope) func(context.Context, desire
 		}
 		return nil
 	}
-}
-
-func isService(key string) bool {
-	return strings.HasPrefix(key, string(desired.KindService)+"/")
 }
 
 // configChangeError refuses a config update that changes anything but labels.

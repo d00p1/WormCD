@@ -304,3 +304,17 @@ func sanitize(s string) string {
 	}
 	return b.String()
 }
+
+// ParseKey is the inverse of Key.String. It reports false for a string that is
+// not a key of a known kind.
+func ParseKey(s string) (Key, bool) {
+	kind, name, ok := strings.Cut(s, "/")
+	if !ok {
+		return Key{}, false
+	}
+	switch Kind(kind) {
+	case KindService, KindNetwork, KindConfig, KindSecret, KindVolume:
+		return Key{Kind: Kind(kind), Name: name}, true
+	}
+	return Key{}, false
+}

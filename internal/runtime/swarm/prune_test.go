@@ -149,17 +149,27 @@ func TestPruneReportsObjectsInUseByServices(t *testing.T) {
 	}
 }
 
-func TestPruneRejectsUnkeptService(t *testing.T) {
+// TestPruneSkipsServiceLeftForApply: Apply removes the services its plan
+// deletes. A service of scope that is still here was not removed, so Prune
+// reports it instead of removing it.
+func TestPruneSkipsServiceLeftForApply(t *testing.T) {
 	fake := testPruneFake()
 	keep := testKeep()
 	delete(keep, desired.Key{Kind: desired.KindService, Name: testService})
 
-	_, err := newRuntime(fake).Prune(context.Background(), testPruneScope(), keep)
-	if err == nil || !strings.Contains(err.Error(), "#18") {
-		t.Fatalf("error = %v, want a not-implemented error for services", err)
+	result, err := newRuntime(fake).Prune(context.Background(), testPruneScope(), keep)
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
 	}
-	if len(fake.calls) != 0 {
-		t.Fatalf("calls = %v, want none", fake.calls)
+	if !slices.ContainsFunc(result.Skipped, func(skip runtime.Skip) bool {
+		return skip.Key == "Service/"+testService && strings.Contains(skip.Reason, "Apply should have removed it")
+	}) {
+		t.Fatalf("skipped = %+v, want the service with a reason", result.Skipped)
+	}
+	for _, call := range fake.calls {
+		if strings.HasPrefix(call, "ServiceRemove") {
+			t.Fatalf("calls = %v, want no service removal by Prune", fake.calls)
+		}
 	}
 }
 
