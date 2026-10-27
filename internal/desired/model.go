@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"cmp"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"time"
@@ -247,9 +248,7 @@ func (d *Desired) Sort() {
 
 // SortServices orders services by name and each service's nested collections.
 func SortServices(services []Service) {
-	slices.SortFunc(services, func(a, b Service) int {
-		return cmp.Or(strings.Compare(a.Name, b.Name), compareEncoded(a, b))
-	})
+	sortByName(services, func(s Service) string { return s.Name })
 	for i := range services {
 		services[i].sort()
 	}
@@ -257,29 +256,32 @@ func SortServices(services []Service) {
 
 // SortNetworks orders networks by name.
 func SortNetworks(networks []Network) {
-	slices.SortFunc(networks, func(a, b Network) int {
-		return cmp.Or(strings.Compare(a.Name, b.Name), compareEncoded(a, b))
-	})
+	sortByName(networks, func(n Network) string { return n.Name })
 }
 
 // SortConfigs orders configs by name.
 func SortConfigs(configs []Config) {
-	slices.SortFunc(configs, func(a, b Config) int {
-		return cmp.Or(strings.Compare(a.Name, b.Name), compareEncoded(a, b))
-	})
+	sortByName(configs, func(c Config) string { return c.Name })
 }
 
 // SortSecrets orders secrets by name.
 func SortSecrets(secrets []Secret) {
-	slices.SortFunc(secrets, func(a, b Secret) int {
-		return cmp.Or(strings.Compare(a.Name, b.Name), compareEncoded(a, b))
-	})
+	sortByName(secrets, func(s Secret) string { return s.Name })
 }
 
 // SortVolumes orders volumes by name.
 func SortVolumes(volumes []Volume) {
-	slices.SortFunc(volumes, func(a, b Volume) int {
-		return cmp.Or(strings.Compare(a.Name, b.Name), compareEncoded(a, b))
+	sortByName(volumes, func(v Volume) string { return v.Name })
+}
+
+// sortByName orders elems by name and breaks ties on the JSON encoding of the
+// whole element.
+func sortByName[T any](elems []T, name func(T) string) {
+	slices.SortFunc(elems, func(a, b T) int {
+		if c := strings.Compare(name(a), name(b)); c != 0 {
+			return c
+		}
+		return compareEncoded(a, b)
 	})
 }
 
@@ -287,8 +289,12 @@ func (s *Service) sort() {
 	slices.SortFunc(s.Ports, comparePort)
 	slices.SortFunc(s.Networks, compareServiceNetwork)
 	slices.SortFunc(s.Mounts, compareMount)
-	slices.SortFunc(s.Configs, compareConfigRef)
-	slices.SortFunc(s.Secrets, compareSecretRef)
+	slices.SortFunc(s.Configs, func(a, b ConfigRef) int {
+		return compareFileRef(fileRef(a), fileRef(b))
+	})
+	slices.SortFunc(s.Secrets, func(a, b SecretRef) int {
+		return compareFileRef(fileRef(a), fileRef(b))
+	})
 }
 
 func comparePort(a, b Port) int {
@@ -317,17 +323,17 @@ func compareMount(a, b Mount) int {
 	)
 }
 
-func compareConfigRef(a, b ConfigRef) int {
-	return cmp.Or(
-		strings.Compare(a.Target, b.Target),
-		strings.Compare(a.Source, b.Source),
-		strings.Compare(a.UID, b.UID),
-		strings.Compare(a.GID, b.GID),
-		cmp.Compare(a.Mode, b.Mode),
-	)
+// fileRef holds the fields that ConfigRef and SecretRef share, in the same
+// order, so either converts to it.
+type fileRef struct {
+	Source string
+	Target string
+	UID    string
+	GID    string
+	Mode   uint32
 }
 
-func compareSecretRef(a, b SecretRef) int {
+func compareFileRef(a, b fileRef) int {
 	return cmp.Or(
 		strings.Compare(a.Target, b.Target),
 		strings.Compare(a.Source, b.Source),
@@ -349,12 +355,19 @@ func compareBool(a, b bool) int {
 }
 
 // compareEncoded orders two values by their JSON encoding. It is the last
-// tie-break for elements that agree on every key compared before it. Canonical
-// checks that the desired state encodes before it sorts, so the errors ignored
-// here do not occur on that path.
+// tie-break for elements that agree on the sort key. An element that cannot be
+// encoded, such as one holding a NaN float, would compare equal to every other
+// such element and make the order depend on input order. That is a programmer
+// error: Canonical rejects such state before it sorts, so this panics.
 func compareEncoded(a, b any) int {
-	ja, _ := json.Marshal(a)
-	jb, _ := json.Marshal(b)
+	ja, err := json.Marshal(a)
+	if err != nil {
+		panic(fmt.Sprintf("desired: sort tie-break cannot encode %T: %v", a, err))
+	}
+	jb, err := json.Marshal(b)
+	if err != nil {
+		panic(fmt.Sprintf("desired: sort tie-break cannot encode %T: %v", b, err))
+	}
 	return bytes.Compare(ja, jb)
 }
 

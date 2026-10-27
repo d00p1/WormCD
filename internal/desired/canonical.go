@@ -2,6 +2,7 @@ package desired
 
 import (
 	"encoding/json"
+	"errors"
 	"slices"
 )
 
@@ -10,7 +11,11 @@ import (
 // produce identical bytes. The store keeps these bytes as a revision's rendered
 // spec. Canonical does not modify d. It fails if d cannot be encoded, such as a
 // NaN float, before sorting, because the sort compares elements by encoding.
+// A nil d is an error, not a panic.
 func (d *Desired) Canonical() ([]byte, error) {
+	if d == nil {
+		return nil, errors.New("desired: canonical form of nil state")
+	}
 	if _, err := json.Marshal(d); err != nil {
 		return nil, err
 	}
