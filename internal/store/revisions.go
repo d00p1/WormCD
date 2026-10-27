@@ -10,8 +10,8 @@ import (
 )
 
 // NewRevision is the input for AppendRevision. RenderedSpec is the JSON
-// document of the fully rendered desired state. Callers sort it before
-// marshaling so that identical renders store identical bytes.
+// document of the fully rendered desired state. Callers pass the bytes from
+// desired.Canonical so that identical renders store identical bytes.
 type NewRevision struct {
 	Commit       string
 	RenderedSpec json.RawMessage

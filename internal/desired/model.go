@@ -229,8 +229,8 @@ type Volume struct {
 	External   bool              `json:"external,omitempty"`
 }
 
-// Sort puts every collection in a deterministic order. Callers should invoke
-// it before marshaling or diffing.
+// Sort puts every collection in a deterministic order, in place. To get the
+// canonical JSON of a state without changing it, use Canonical.
 func (d *Desired) Sort() {
 	SortServices(d.Services)
 	SortNetworks(d.Networks)
