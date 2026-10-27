@@ -3,6 +3,7 @@ package swarm
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	cerrdefs "github.com/containerd/errdefs"
@@ -56,28 +57,44 @@ func (r *Runtime) updateService(scope runtime.Scope) func(context.Context, desir
 // the configs and secrets it references. Config and secret names are final by
 // now: configs were created earlier in this Apply.
 func (r *Runtime) serviceSpecFor(ctx context.Context, scope runtime.Scope, service desired.Service) (swarm.ServiceSpec, error) {
-	ids := referenceIDs{Configs: make(map[string]string), Secrets: make(map[string]string)}
-	for _, ref := range service.Configs {
-		if _, ok := ids.Configs[ref.Source]; ok {
+	configIDs, err := resolveIDs(ctx, "config", service.Configs,
+		func(ref desired.ConfigRef) string { return ref.Source },
+		func(ctx context.Context, name string) (string, error) {
+			inspected, err := r.api.ConfigInspect(ctx, name, client.ConfigInspectOptions{})
+			return inspected.Config.ID, err
+		})
+	if err != nil {
+		return swarm.ServiceSpec{}, err
+	}
+	secretIDs, err := resolveIDs(ctx, "secret", service.Secrets,
+		func(ref desired.SecretRef) string { return ref.Source },
+		func(ctx context.Context, name string) (string, error) {
+			inspected, err := r.api.SecretInspect(ctx, name, client.SecretInspectOptions{})
+			return inspected.Secret.ID, err
+		})
+	if err != nil {
+		return swarm.ServiceSpec{}, err
+	}
+	return serviceSpec(service, scope, referenceIDs{Configs: configIDs, Secrets: secretIDs})
+}
+
+// resolveIDs looks up the Docker ID of every object that refs name, once per name.
+func resolveIDs[R any](ctx context.Context, kind string, refs []R, name func(R) string,
+	inspect func(context.Context, string) (string, error),
+) (map[string]string, error) {
+	ids := make(map[string]string, len(refs))
+	for _, ref := range refs {
+		objectName := name(ref)
+		if _, ok := ids[objectName]; ok {
 			continue
 		}
-		inspected, err := r.api.ConfigInspect(ctx, ref.Source, client.ConfigInspectOptions{})
+		id, err := inspect(ctx, objectName)
 		if err != nil {
-			return swarm.ServiceSpec{}, fmt.Errorf("inspect config %s: %w", ref.Source, err)
+			return nil, fmt.Errorf("inspect %s %s: %w", kind, objectName, err)
 		}
-		ids.Configs[ref.Source] = inspected.Config.ID
+		ids[objectName] = id
 	}
-	for _, ref := range service.Secrets {
-		if _, ok := ids.Secrets[ref.Source]; ok {
-			continue
-		}
-		inspected, err := r.api.SecretInspect(ctx, ref.Source, client.SecretInspectOptions{})
-		if err != nil {
-			return swarm.ServiceSpec{}, fmt.Errorf("inspect secret %s: %w", ref.Source, err)
-		}
-		ids.Secrets[ref.Source] = inspected.Secret.ID
-	}
-	return serviceSpec(service, scope, ids)
+	return ids, nil
 }
 
 // deleteServices removes the services whose plan entry is Delete. Each one is
@@ -85,12 +102,12 @@ func (r *Runtime) serviceSpecFor(ctx context.Context, scope runtime.Scope, servi
 // is not an error: the plan was made before it disappeared, and the desired
 // state does not want it either.
 func (r *Runtime) deleteServices(ctx context.Context, result *runtime.Result, scope runtime.Scope, entries []runtime.Entry) error {
-	prefix := string(desired.KindService) + "/"
 	for _, entry := range entries {
-		name, ok := strings.CutPrefix(entry.Key, prefix)
-		if !ok || entry.Action != runtime.Delete {
+		key, ok := desired.ParseKey(entry.Key)
+		if !ok || key.Kind != desired.KindService || entry.Action != runtime.Delete {
 			continue
 		}
+		name := key.Name
 		current, err := r.inspectOwnedService(ctx, scope, name)
 		if cerrdefs.IsNotFound(err) {
 			continue
@@ -121,4 +138,68 @@ func (r *Runtime) inspectOwnedService(ctx context.Context, scope runtime.Scope, 
 		return swarm.Service{}, fmt.Errorf("service %s: not owned by %s/%s", name, scope.Application, scope.Target)
 	}
 	return inspected.Service, nil
+}
+
+// preflightServices checks every desired service before the first mutation: it
+// needs a plan entry, its references must be declared, and its spec must be
+// convertible. A mode change is refused, because Docker does not allow it in
+// place.
+func preflightServices(desiredState desired.Desired, entries map[string]runtime.Entry) error {
+	for _, service := range desiredState.Services {
+		key := desired.Key{Kind: desired.KindService, Name: service.Name}.String()
+		entry, ok := entries[key]
+		if !ok {
+			return fmt.Errorf("%s: missing from the plan", key)
+		}
+		switch entry.Action {
+		case runtime.Create:
+		case runtime.Update:
+			if slices.Contains(entry.Changes, "mode") {
+				return fmt.Errorf("%s: service mode cannot change in place (%s); recreate the service by hand",
+					key, strings.Join(entry.Changes, ", "))
+			}
+		default:
+			continue
+		}
+		if err := validateService(service, desiredState); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateService runs the checks of serviceSpec that need no Docker IDs, and
+// checks that every reference is declared in the desired state.
+func validateService(service desired.Service, desiredState desired.Desired) error {
+	if _, err := serviceMode(service); err != nil {
+		return fmt.Errorf("service %s: %w", service.Name, err)
+	}
+	if _, err := mountSpecs(service.Mounts); err != nil {
+		return fmt.Errorf("service %s: %w", service.Name, err)
+	}
+	if err := checkDeclared(service.Name, "config", service.Configs,
+		func(ref desired.ConfigRef) string { return ref.Source },
+		desiredState.Configs, func(config desired.Config) string { return config.Name }); err != nil {
+		return err
+	}
+	return checkDeclared(service.Name, "secret", service.Secrets,
+		func(ref desired.SecretRef) string { return ref.Source },
+		desiredState.Secrets, func(secret desired.Secret) string { return secret.Name })
+}
+
+// checkDeclared fails for the first reference to an object that the desired
+// state does not declare.
+func checkDeclared[R, D any](service, kind string, refs []R, refName func(R) string,
+	objects []D, objectName func(D) string,
+) error {
+	declared := make(map[string]bool, len(objects))
+	for _, object := range objects {
+		declared[objectName(object)] = true
+	}
+	for _, ref := range refs {
+		if !declared[refName(ref)] {
+			return fmt.Errorf("service %s: %s %s is not declared in the desired state", service, kind, refName(ref))
+		}
+	}
+	return nil
 }

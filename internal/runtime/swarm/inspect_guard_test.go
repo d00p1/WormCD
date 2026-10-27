@@ -16,7 +16,7 @@ func TestInspectAPIIsReadOnly(t *testing.T) {
 		t.Fatal("readAPI has no methods")
 	}
 
-	for i := 0; i < typ.NumMethod(); i++ {
+	for i := range typ.NumMethod() {
 		name := typ.Method(i).Name
 		if !strings.HasSuffix(name, "List") && !strings.HasPrefix(name, "Inspect") {
 			t.Errorf("readAPI method %q is not a read-only list/inspect call", name)
@@ -48,7 +48,7 @@ var writeAllowlist = map[string]string{
 func TestWriteAPIIsAllowlisted(t *testing.T) {
 	typ := reflect.TypeOf((*writeAPI)(nil)).Elem()
 	seen := make(map[string]bool, typ.NumMethod())
-	for i := 0; i < typ.NumMethod(); i++ {
+	for i := range typ.NumMethod() {
 		name := typ.Method(i).Name
 		seen[name] = true
 		reason, ok := writeAllowlist[name]
@@ -71,7 +71,7 @@ func TestWriteAPIIsAllowlisted(t *testing.T) {
 func TestWriteAPIUpdatesAreDeliberate(t *testing.T) {
 	typ := reflect.TypeOf((*writeAPI)(nil)).Elem()
 	var updates []string
-	for i := 0; i < typ.NumMethod(); i++ {
+	for i := range typ.NumMethod() {
 		if name := typ.Method(i).Name; strings.HasSuffix(name, "Update") {
 			updates = append(updates, name)
 		}
@@ -97,7 +97,7 @@ func TestVersionReadersAreInspectOnly(t *testing.T) {
 	}
 	for name, typ := range readers {
 		var names []string
-		for i := 0; i < typ.NumMethod(); i++ {
+		for i := range typ.NumMethod() {
 			names = append(names, typ.Method(i).Name)
 		}
 		if !slices.Equal(names, want[name]) {

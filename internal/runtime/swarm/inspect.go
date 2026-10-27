@@ -98,7 +98,7 @@ func New(api *client.Client) *Runtime {
 func newRuntime(api api) *Runtime {
 	return &Runtime{
 		api:      api,
-		converge: convergence{Interval: 2 * time.Second, Timeout: 10 * time.Minute},
+		converge: convergence{Interval: defaultConvergeInterval, Timeout: defaultConvergeTimeout},
 	}
 }
 

@@ -3,7 +3,6 @@ package swarm
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 
 	"github.com/d00p1/wormcd/internal/desired"
@@ -98,64 +97,6 @@ func preflight(desiredState desired.Desired, entries map[string]runtime.Entry) e
 		return err
 	}
 	return preflightServices(desiredState, entries)
-}
-
-// preflightServices checks every desired service before the first mutation: it
-// needs a plan entry, its references must be declared, and its spec must be
-// convertible. A mode change is refused, because Docker does not allow it in
-// place.
-func preflightServices(desiredState desired.Desired, entries map[string]runtime.Entry) error {
-	for _, service := range desiredState.Services {
-		key := desired.Key{Kind: desired.KindService, Name: service.Name}.String()
-		entry, ok := entries[key]
-		if !ok {
-			return fmt.Errorf("%s: missing from the plan", key)
-		}
-		switch entry.Action {
-		case runtime.Create:
-		case runtime.Update:
-			if slices.Contains(entry.Changes, "mode") {
-				return fmt.Errorf("%s: service mode cannot change in place (%s); recreate the service by hand",
-					key, strings.Join(entry.Changes, ", "))
-			}
-		default:
-			continue
-		}
-		if err := validateService(service, desiredState); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// validateService runs the checks of serviceSpec that need no Docker IDs, and
-// checks that every reference is declared in the desired state.
-func validateService(service desired.Service, desiredState desired.Desired) error {
-	if _, err := serviceMode(service); err != nil {
-		return fmt.Errorf("service %s: %w", service.Name, err)
-	}
-	if _, err := mountSpecs(service.Mounts); err != nil {
-		return fmt.Errorf("service %s: %w", service.Name, err)
-	}
-	declaredConfigs := make(map[string]bool, len(desiredState.Configs))
-	for _, config := range desiredState.Configs {
-		declaredConfigs[config.Name] = true
-	}
-	for _, ref := range service.Configs {
-		if !declaredConfigs[ref.Source] {
-			return fmt.Errorf("service %s: config %s is not declared in the desired state", service.Name, ref.Source)
-		}
-	}
-	declaredSecrets := make(map[string]bool, len(desiredState.Secrets))
-	for _, secret := range desiredState.Secrets {
-		declaredSecrets[secret.Name] = true
-	}
-	for _, ref := range service.Secrets {
-		if !declaredSecrets[ref.Source] {
-			return fmt.Errorf("service %s: secret %s is not declared in the desired state", service.Name, ref.Source)
-		}
-	}
-	return nil
 }
 
 // checkObjects reports an error for a managed object that has no entry in the

@@ -121,46 +121,70 @@ func mountSpecs(mounts []desired.Mount) ([]mount.Mount, error) {
 	return emptyToNil(out), nil
 }
 
-func configRefSpecs(refs []desired.ConfigRef, ids map[string]string) ([]*swarm.ConfigReference, error) {
-	out := make([]*swarm.ConfigReference, 0, len(refs))
+// fileRef is the part of a config or secret reference that Docker takes as a
+// file target: the object name, the path the service mounts it at, and its
+// ownership and mode.
+type fileRef struct {
+	Source string
+	Target string
+	UID    string
+	GID    string
+	Mode   uint32
+}
+
+// refSpecs builds one Docker reference per desired reference. Docker takes a
+// reference by ID, so an object without an ID is an error.
+func refSpecs[R, S any](kind string, refs []R, file func(R) fileRef, ids map[string]string,
+	build func(fileRef, string) S,
+) ([]S, error) {
+	out := make([]S, 0, len(refs))
 	for _, ref := range refs {
-		id, ok := ids[ref.Source]
+		f := file(ref)
+		id, ok := ids[f.Source]
 		if !ok {
-			return nil, fmt.Errorf("config %s has no Docker ID", ref.Source)
+			return nil, fmt.Errorf("%s %s has no Docker ID", kind, f.Source)
 		}
-		out = append(out, &swarm.ConfigReference{
-			ConfigID:   id,
-			ConfigName: ref.Source,
-			File: &swarm.ConfigReferenceFileTarget{
-				Name: ref.Target,
-				UID:  ref.UID,
-				GID:  ref.GID,
-				Mode: os.FileMode(ref.Mode),
-			},
-		})
+		out = append(out, build(f, id))
 	}
 	return emptyToNil(out), nil
 }
 
-func secretRefSpecs(refs []desired.SecretRef, ids map[string]string) ([]*swarm.SecretReference, error) {
-	out := make([]*swarm.SecretReference, 0, len(refs))
-	for _, ref := range refs {
-		id, ok := ids[ref.Source]
-		if !ok {
-			return nil, fmt.Errorf("secret %s has no Docker ID", ref.Source)
-		}
-		out = append(out, &swarm.SecretReference{
-			SecretID:   id,
-			SecretName: ref.Source,
-			File: &swarm.SecretReferenceFileTarget{
-				Name: ref.Target,
-				UID:  ref.UID,
-				GID:  ref.GID,
-				Mode: os.FileMode(ref.Mode),
-			},
+func configRefSpecs(refs []desired.ConfigRef, ids map[string]string) ([]*swarm.ConfigReference, error) {
+	return refSpecs("config", refs,
+		func(ref desired.ConfigRef) fileRef {
+			return fileRef{Source: ref.Source, Target: ref.Target, UID: ref.UID, GID: ref.GID, Mode: ref.Mode}
+		}, ids,
+		func(f fileRef, id string) *swarm.ConfigReference {
+			return &swarm.ConfigReference{
+				ConfigID:   id,
+				ConfigName: f.Source,
+				File: &swarm.ConfigReferenceFileTarget{
+					Name: f.Target,
+					UID:  f.UID,
+					GID:  f.GID,
+					Mode: os.FileMode(f.Mode),
+				},
+			}
 		})
-	}
-	return emptyToNil(out), nil
+}
+
+func secretRefSpecs(refs []desired.SecretRef, ids map[string]string) ([]*swarm.SecretReference, error) {
+	return refSpecs("secret", refs,
+		func(ref desired.SecretRef) fileRef {
+			return fileRef{Source: ref.Source, Target: ref.Target, UID: ref.UID, GID: ref.GID, Mode: ref.Mode}
+		}, ids,
+		func(f fileRef, id string) *swarm.SecretReference {
+			return &swarm.SecretReference{
+				SecretID:   id,
+				SecretName: f.Source,
+				File: &swarm.SecretReferenceFileTarget{
+					Name: f.Target,
+					UID:  f.UID,
+					GID:  f.GID,
+					Mode: os.FileMode(f.Mode),
+				},
+			}
+		})
 }
 
 // envList writes the environment as KEY=VALUE pairs in key order, so the same
