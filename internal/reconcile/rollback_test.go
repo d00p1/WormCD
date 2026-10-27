@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/d00p1/wormcd/internal/desired"
 	"github.com/d00p1/wormcd/internal/store"
 )
 
@@ -95,4 +96,64 @@ func TestRollbackApplyErrorDegrades(t *testing.T) {
 	if last := events[len(events)-1]; last.Type != EventRollbackFailed || last.Revision != 1 {
 		t.Fatalf("last event = %+v, want rollback.failed for revision 1", last)
 	}
+}
+
+// overwriteSpec replaces the stored rendered spec of a revision, as a damaged
+// database would.
+func (e *env) overwriteSpec(t *testing.T, number int64, spec string) {
+	t.Helper()
+	_, err := e.db.Exec(`
+		UPDATE revisions SET rendered_spec = ?
+		WHERE number = ? AND target_id = (SELECT id FROM targets WHERE app = 'web' AND target = 'prod')`,
+		spec, number)
+	if err != nil {
+		t.Fatalf("overwrite spec: %v", err)
+	}
+}
+
+func TestRollbackRejectsCorruptedSpec(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	if _, err := e.svc.Sync(ctx, prod); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	rev, err := e.st.Revision(ctx, "web", "prod", 1)
+	if err != nil {
+		t.Fatalf("Revision: %v", err)
+	}
+	// Decoding drops the unknown field, so the spec no longer round-trips.
+	e.overwriteSpec(t, 1, `{"extra":true,`+string(rev.RenderedSpec[1:]))
+	applies, prunes := mutations(e.fake)
+
+	if _, err := e.svc.Rollback(ctx, prod, 1); err == nil || !strings.Contains(err.Error(), "is corrupted") {
+		t.Fatalf("Rollback err = %v, want the corrupted revision error", err)
+	}
+	if a, p := mutations(e.fake); a != applies || p != prunes {
+		t.Fatalf("runtime mutated: applies %d->%d, prunes %d->%d", applies, a, prunes, p)
+	}
+	e.assertState(t, "prod", store.StatusSynced, 1)
+}
+
+func TestRollbackRefusesSpecWithoutServices(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	if _, err := e.svc.Sync(ctx, prod); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	// A canonical spec with no services: it round-trips, so only the services
+	// check can refuse it.
+	empty, err := (&desired.Desired{Application: "web", Target: "prod", Namespace: "wormcd_web_prod"}).Canonical()
+	if err != nil {
+		t.Fatalf("Canonical: %v", err)
+	}
+	e.overwriteSpec(t, 1, string(empty))
+	applies, prunes := mutations(e.fake)
+
+	if _, err := e.svc.Rollback(ctx, prod, 1); err == nil || !strings.Contains(err.Error(), "has no services") {
+		t.Fatalf("Rollback err = %v, want the no-services error", err)
+	}
+	if a, p := mutations(e.fake); a != applies || p != prunes {
+		t.Fatalf("runtime mutated: applies %d->%d, prunes %d->%d", applies, a, prunes, p)
+	}
+	e.assertState(t, "prod", store.StatusSynced, 1)
 }

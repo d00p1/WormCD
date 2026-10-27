@@ -1,6 +1,7 @@
 package reconcile
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -25,11 +26,22 @@ func (s *Service) Rollback(ctx context.Context, r Ref, number int64) (int64, err
 	}
 	var state desired.Desired
 	if err := json.Unmarshal(rev.RenderedSpec, &state); err != nil {
-		return 0, fmt.Errorf("rollback %s to revision %d: decode rendered spec: %w", r, number, err)
+		return 0, fmt.Errorf("rollback %s: revision %d is corrupted: decode rendered spec: %w", r, number, err)
 	}
 	if state.Application != r.Application || state.Target != r.Target {
 		return 0, fmt.Errorf("rollback %s to revision %d: revision belongs to %s/%s",
 			r, number, state.Application, state.Target)
+	}
+	// Encoding the decoded state must give back the stored bytes. If it does
+	// not, the stored spec lost or changed a field, and applying it would not
+	// apply what was rendered.
+	canonical, err := state.Canonical()
+	if err != nil || !bytes.Equal(canonical, rev.RenderedSpec) {
+		return 0, fmt.Errorf("rollback %s: revision %d is corrupted: rendered spec does not round-trip", r, number)
+	}
+	// A spec without services would make Prune remove every object of the target.
+	if len(state.Services) == 0 {
+		return 0, fmt.Errorf("rollback %s: revision %d has no services, refusing rollback", r, number)
 	}
 
 	op := operation{
