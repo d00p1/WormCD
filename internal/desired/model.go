@@ -349,7 +349,9 @@ func compareBool(a, b bool) int {
 }
 
 // compareEncoded orders two values by their JSON encoding. It is the last
-// tie-break for elements that agree on every key compared before it.
+// tie-break for elements that agree on every key compared before it. Canonical
+// checks that the desired state encodes before it sorts, so the errors ignored
+// here do not occur on that path.
 func compareEncoded(a, b any) int {
 	ja, _ := json.Marshal(a)
 	jb, _ := json.Marshal(b)

@@ -2,6 +2,7 @@ package desired
 
 import (
 	"bytes"
+	"math"
 	"reflect"
 	"slices"
 	"strings"
@@ -223,6 +224,16 @@ func TestCanonicalTieBreakIgnoresInputOrder(t *testing.T) {
 				t.Errorf("tied elements depend on input order:\n%s\n%s", got, want)
 			}
 		})
+	}
+}
+
+func TestCanonicalRejectsUnencodableState(t *testing.T) {
+	d := shuffled()
+	d.Services[1].Name = d.Services[0].Name
+	d.Services[1].Update.MaxFailureRatio = float32(math.NaN())
+
+	if _, err := Canonical(&d); err == nil {
+		t.Fatal("Canonical(NaN) returned no error")
 	}
 }
 
