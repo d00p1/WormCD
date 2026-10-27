@@ -177,11 +177,6 @@ func TestApplyRejectsImmutableUpdates(t *testing.T) {
 		want  string
 	}{
 		{
-			name:  "config",
-			entry: runtime.Entry{Key: "Config/" + testConfig, Action: runtime.Update, Changes: []string{"labels.team"}},
-			want:  "configs and secrets are immutable",
-		},
-		{
 			name:  "network",
 			entry: runtime.Entry{Key: "Network/" + testNetwork, Action: runtime.Update, Changes: []string{"driver"}},
 			want:  "in-place update is not supported",
@@ -204,6 +199,89 @@ func TestApplyRejectsImmutableUpdates(t *testing.T) {
 				t.Fatalf("calls = %v, want none", fake.calls)
 			}
 		})
+	}
+}
+
+func TestApplyUpdatesConfigLabelsInPlace(t *testing.T) {
+	desiredState := testDesired()
+	desiredState.Configs[0].Labels["team"] = "b"
+	existing := oldConfigObject()
+	existing.ID = "id-" + testConfig
+	existing.Spec.Name = testConfig
+	existing.Spec.Data = []byte("server {}")
+	existing.Spec.Labels = desired.Labels("web", "prod")
+	existing.Version = swarm.Version{Index: 7}
+	fake := &fakeAPI{configs: client.ConfigListResult{Items: []swarm.Config{existing}}}
+
+	plan := testPlan(desiredState,
+		runtime.Entry{Key: "Config/" + testConfig, Action: runtime.Update, Changes: []string{"labels.team"}},
+	)
+	result, err := newRuntime(fake).Apply(context.Background(), plan)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if want := []string{"ConfigUpdate:" + testConfig}; !slices.Equal(fake.calls, want) {
+		t.Fatalf("calls = %v, want %v", fake.calls, want)
+	}
+	if want := []string{"Config/" + testConfig}; !slices.Equal(result.Updated, want) || len(result.Created) != 0 {
+		t.Fatalf("result = %+v, want Updated %v and nothing created", result, want)
+	}
+
+	got := fake.configs.Items[0]
+	wantLabels := desired.MergeLabels(desiredState.Configs[0].Labels, "web", "prod")
+	if !maps.Equal(got.Spec.Labels, wantLabels) {
+		t.Errorf("labels = %v, want %v", got.Spec.Labels, wantLabels)
+	}
+	if got.Version.Index != 8 {
+		t.Errorf("version = %d, want 8 after one update", got.Version.Index)
+	}
+	if string(got.Spec.Data) != "server {}" || got.ID != "id-"+testConfig {
+		t.Errorf("config = %+v, want the same object with unchanged data", got)
+	}
+
+	// The plan is applied once; a second Apply with the Noop entry must not touch the config.
+	fake.calls = nil
+	noop := testPlan(desiredState, runtime.Entry{Key: "Config/" + testConfig, Action: runtime.Noop})
+	if _, err := newRuntime(fake).Apply(context.Background(), noop); err != nil {
+		t.Fatalf("second Apply: %v", err)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("re-applying an in-sync config mutated the cluster: calls = %v", fake.calls)
+	}
+}
+
+func TestApplyRejectsNonLabelConfigUpdate(t *testing.T) {
+	existing := oldConfigObject()
+	existing.ID = "id-" + testConfig
+	existing.Spec.Name = testConfig
+	existing.Spec.Data = []byte("server {}")
+	fake := &fakeAPI{configs: client.ConfigListResult{Items: []swarm.Config{existing}}}
+
+	plan := testPlan(testDesired(),
+		runtime.Entry{Key: "Config/" + testConfig, Action: runtime.Update, Changes: []string{"labels.team", "data"}},
+	)
+	_, err := newRuntime(fake).Apply(context.Background(), plan)
+	if err == nil || !strings.Contains(err.Error(), "cannot be applied in place") {
+		t.Fatalf("error = %v, want a non-label config update error", err)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("calls = %v, want none: the update must be refused before the API is called", fake.calls)
+	}
+}
+
+func TestApplyRejectsSecretUpdate(t *testing.T) {
+	desiredState := testDesired()
+	desiredState.Secrets = []desired.Secret{{Name: "managed", Source: "managed"}}
+	fake := &fakeAPI{}
+
+	_, err := newRuntime(fake).Apply(context.Background(), testPlan(desiredState,
+		runtime.Entry{Key: "Secret/managed", Action: runtime.Update, Changes: []string{"labels.team"}},
+	))
+	if err == nil || !strings.Contains(err.Error(), "secrets are immutable") {
+		t.Fatalf("error = %v, want a secret-immutable error", err)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("calls = %v, want none", fake.calls)
 	}
 }
 

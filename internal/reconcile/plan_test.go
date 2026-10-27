@@ -340,14 +340,14 @@ func testService(name string) desired.Service {
 	}
 }
 
-func TestDiffNeverUpdatesConfigsOrSecrets(t *testing.T) {
+func TestDiffUpdatesConfigLabelsInPlace(t *testing.T) {
 	desiredState := &desired.Desired{
 		Application: "web",
 		Target:      "prod",
 		Namespace:   "wormcd_web_prod",
 		Configs: []desired.Config{{
 			Name:   "wormcd_web_prod_nginx_abc",
-			Labels: desired.Labels("web", "prod"),
+			Labels: map[string]string{desired.LabelApplication: "web", desired.LabelTarget: "prod", "team": "b"},
 		}},
 	}
 	observedState := runtime.Observed{
@@ -361,7 +361,37 @@ func TestDiffNeverUpdatesConfigsOrSecrets(t *testing.T) {
 	}
 
 	plan := Diff(desiredState, observedState)
+	if plan.Summary != (runtime.Summary{Update: 1}) {
+		t.Fatalf("summary = %+v, want one Update and no Create or Delete", plan.Summary)
+	}
+	entry := plan.Entries[0]
+	if entry.Action != runtime.Update || !slices.Equal(entry.Changes, []string{"labels.team"}) {
+		t.Fatalf("config = %+v, want Update [labels.team]", entry)
+	}
+}
+
+func TestDiffNeverUpdatesSecrets(t *testing.T) {
+	desiredState := &desired.Desired{
+		Application: "web",
+		Target:      "prod",
+		Namespace:   "wormcd_web_prod",
+		Secrets: []desired.Secret{{
+			Name:   "wormcd_web_prod_tls",
+			Labels: desired.Labels("web", "prod"),
+		}},
+	}
+	observedState := runtime.Observed{
+		Application: "web",
+		Target:      "prod",
+		Namespace:   "wormcd_web_prod",
+		Secrets: []desired.Secret{{
+			Name:   "wormcd_web_prod_tls",
+			Labels: map[string]string{desired.LabelApplication: "web", desired.LabelTarget: "prod", "team": "a"},
+		}},
+	}
+
+	plan := Diff(desiredState, observedState)
 	if plan.Summary.Update != 0 {
-		t.Fatalf("summary = %+v, want no Update: configs are identified by a name that includes their labels", plan.Summary)
+		t.Fatalf("summary = %+v, want no Update: secrets have no in-place update in v0", plan.Summary)
 	}
 }

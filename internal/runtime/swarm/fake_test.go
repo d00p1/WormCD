@@ -1,7 +1,9 @@
 package swarm
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"slices"
 
 	"github.com/moby/moby/api/types/network"
@@ -34,6 +36,18 @@ func (f *fakeAPI) NetworkList(context.Context, client.NetworkListOptions) (clien
 
 func (f *fakeAPI) ConfigList(context.Context, client.ConfigListOptions) (client.ConfigListResult, error) {
 	return f.configs, f.err
+}
+
+func (f *fakeAPI) ConfigInspect(_ context.Context, name string, _ client.ConfigInspectOptions) (client.ConfigInspectResult, error) {
+	if f.err != nil {
+		return client.ConfigInspectResult{}, f.err
+	}
+	for _, config := range f.configs.Items {
+		if config.Spec.Name == name {
+			return client.ConfigInspectResult{Config: config}, nil
+		}
+	}
+	return client.ConfigInspectResult{}, fmt.Errorf("config %s not found", name)
 }
 
 func (f *fakeAPI) SecretList(context.Context, client.SecretListOptions) (client.SecretListResult, error) {
@@ -80,9 +94,36 @@ func (f *fakeAPI) ConfigCreate(_ context.Context, options client.ConfigCreateOpt
 	id := "id-" + name
 	f.configs.Items = append(f.configs.Items, swarm.Config{
 		ID:   id,
+		Meta: swarm.Meta{Version: swarm.Version{Index: 1}},
 		Spec: options.Spec,
 	})
 	return client.ConfigCreateResult{ID: id}, nil
+}
+
+// ConfigUpdate mirrors Docker: the version must match the stored object, the
+// data must not change, and only labels are replaced.
+func (f *fakeAPI) ConfigUpdate(_ context.Context, name string, options client.ConfigUpdateOptions) (client.ConfigUpdateResult, error) {
+	f.calls = append(f.calls, "ConfigUpdate:"+name)
+	if f.err != nil {
+		return client.ConfigUpdateResult{}, f.err
+	}
+	for i, config := range f.configs.Items {
+		if config.Spec.Name != name {
+			continue
+		}
+		if options.Version.Index != config.Version.Index {
+			return client.ConfigUpdateResult{}, fmt.Errorf("config %s: version %d is out of date (have %d)",
+				name, options.Version.Index, config.Version.Index)
+		}
+		if !bytes.Equal(options.Spec.Data, config.Spec.Data) {
+			return client.ConfigUpdateResult{}, fmt.Errorf("config %s: data cannot be changed", name)
+		}
+		config.Spec.Labels = options.Spec.Labels
+		config.Version.Index++
+		f.configs.Items[i] = config
+		return client.ConfigUpdateResult{}, nil
+	}
+	return client.ConfigUpdateResult{}, fmt.Errorf("config %s not found", name)
 }
 
 func (f *fakeAPI) ConfigRemove(_ context.Context, id string, _ client.ConfigRemoveOptions) (client.ConfigRemoveResult, error) {

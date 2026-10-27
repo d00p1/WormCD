@@ -60,6 +60,7 @@ func (s Set) Has(kind desired.Kind, name string) bool {
 // Result reports what Apply changed in the cluster.
 type Result struct {
 	Created []string `json:"created,omitempty"`
+	Updated []string `json:"updated,omitempty"`
 }
 
 // PruneResult reports what Prune removed and which unwanted objects it left in

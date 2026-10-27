@@ -2,6 +2,8 @@ package manifest
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"os"
@@ -190,12 +192,13 @@ configs:
 	if first.Configs[0].Name == second.Configs[0].Name {
 		t.Fatalf("config name did not change: %q", first.Configs[0].Name)
 	}
-	if got, want := first.Configs[0].Hash, configHash([]byte("one"), first.Configs[0].Labels); got != want {
-		t.Errorf("hash = %q, want %q", got, want)
+	want := sha256.Sum256([]byte("one"))
+	if got, wantHash := first.Configs[0].Hash, hex.EncodeToString(want[:])[:12]; got != wantHash {
+		t.Errorf("hash = %q, want %q", got, wantHash)
 	}
 }
 
-func TestConfigLabelChangesName(t *testing.T) {
+func TestConfigLabelChangeKeepsName(t *testing.T) {
 	compose := func(team string) string {
 		return `services:
   web:
@@ -221,8 +224,11 @@ configs:
 	first := load(t, firstPath, "")
 	second := load(t, secondPath, "")
 
-	if first.Configs[0].Name == second.Configs[0].Name {
-		t.Fatalf("config name did not change with labels: %q", first.Configs[0].Name)
+	if first.Configs[0].Name != second.Configs[0].Name {
+		t.Fatalf("config name changed with labels: %q -> %q", first.Configs[0].Name, second.Configs[0].Name)
+	}
+	if got := second.Configs[0].Labels["team"]; got != "b" {
+		t.Errorf("labels[team] = %q, want %q", got, "b")
 	}
 }
 

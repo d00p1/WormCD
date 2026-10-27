@@ -199,7 +199,8 @@ Swarm-реализация:
 
 - `Inspect` — services/configs/secrets/networks/volumes, отфильтрованные по меткам;
 - `Apply` — создание сетей, создание configs/secrets, `ServiceUpdate` для сервисов;
-- configs/secrets иммутабельны: новое содержимое или новые labels = новое имя с хешем, сервис переключается, старые удаляются после успешной сходимости;
+- configs: данные иммутабельны. Новое содержимое = новое имя с хешем (`<name>_<sha256[:12]>`), сервис переключается, старые удаляются после успешной сходимости. Labels config меняются на месте через `ConfigUpdate` (имя не меняется, Diff даёт Update с `labels.<key>`). `ConfigUpdate` требует текущую версию объекта, поэтому Apply берёт её из Inspect, и Spec с теми же data и обновлёнными labels; любое другое изменение Update отклоняется до вызова API;
+- secrets иммутабельны и в v0 не создаются (managed secrets отклоняет normalize), поэтому `SecretUpdate` не реализован: Diff не даёт для них Update;
 - `Prune` удаляет networks, configs и secrets, которые не в `keep` и не используются сервисами. Пропущенные объекты попадают в `PruneResult.Skipped` с причиной;
 - volumes не удаляются автоматически: в них данные. Prune оставляет неиспользуемый volume и перечисляет его в `Skipped`; удаляет его человек;
 - `Health` — desired replicas vs running, статус update, ошибки задач; опционально HTTP-проба с control plane (у Swarm нет readiness).

@@ -24,6 +24,7 @@ type readAPI interface {
 	ServiceList(context.Context, client.ServiceListOptions) (client.ServiceListResult, error)
 	NetworkList(context.Context, client.NetworkListOptions) (client.NetworkListResult, error)
 	ConfigList(context.Context, client.ConfigListOptions) (client.ConfigListResult, error)
+	ConfigInspect(context.Context, string, client.ConfigInspectOptions) (client.ConfigInspectResult, error)
 	SecretList(context.Context, client.SecretListOptions) (client.SecretListResult, error)
 	VolumeList(context.Context, client.VolumeListOptions) (client.VolumeListResult, error)
 }
@@ -33,6 +34,7 @@ type writeAPI interface {
 	NetworkCreate(context.Context, string, client.NetworkCreateOptions) (client.NetworkCreateResult, error)
 	NetworkRemove(context.Context, string, client.NetworkRemoveOptions) (client.NetworkRemoveResult, error)
 	ConfigCreate(context.Context, client.ConfigCreateOptions) (client.ConfigCreateResult, error)
+	ConfigUpdate(context.Context, string, client.ConfigUpdateOptions) (client.ConfigUpdateResult, error)
 	ConfigRemove(context.Context, string, client.ConfigRemoveOptions) (client.ConfigRemoveResult, error)
 	SecretCreate(context.Context, client.SecretCreateOptions) (client.SecretCreateResult, error)
 	SecretRemove(context.Context, string, client.SecretRemoveOptions) (client.SecretRemoveResult, error)

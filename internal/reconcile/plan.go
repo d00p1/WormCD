@@ -45,11 +45,13 @@ var (
 		name:    networkName,
 		changes: networkChanges,
 	}
-	// Config names carry a hash of content and labels (see manifest.configHash),
-	// so a matching name already means matching content and labels.
+	// Config names carry a hash of the content, so a matching name already means
+	// matching data. Labels are the one thing Docker can change in place
+	// (ConfigUpdate), so they are the only config changes.
 	configKind = objectKind[desired.Config]{
-		kind: desired.KindConfig,
-		name: configName,
+		kind:    desired.KindConfig,
+		name:    configName,
+		changes: configChanges,
 	}
 	// Managed secrets cannot be created in v0 (see swarm.Apply), so there is
 	// nothing to compare.
@@ -141,6 +143,12 @@ func networkChanges(desiredNetwork, observedNetwork desired.Network) []string {
 	addChange(&out, "attachable", desiredNetwork.Attachable, observedNetwork.Attachable)
 	addChange(&out, "internal", desiredNetwork.Internal, observedNetwork.Internal)
 	addMapChanges(&out, "labels", desiredNetwork.Labels, observedNetwork.Labels)
+	return out
+}
+
+func configChanges(desiredConfig, observedConfig desired.Config) []string {
+	var out []string
+	addMapChanges(&out, "labels", desiredConfig.Labels, observedConfig.Labels)
 	return out
 }
 

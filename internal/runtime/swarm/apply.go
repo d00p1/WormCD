@@ -16,9 +16,10 @@ import (
 // deletions belong to Prune, which runs after the services have moved off the
 // old objects.
 //
-// Configs and secrets are immutable. A content change arrives as a new name
-// (the hash is part of it), so an Update on them is an error, not a silent
-// in-place edit. Service changes are not applied until #18.
+// Configs change in place only by their labels, through ConfigUpdate: Docker
+// fixes a config's data, so a content change arrives as a new name (the hash is
+// part of it). Secrets have no in-place update in v0, so an Update on them is an
+// error. Service changes are not applied until #18.
 func (r *Runtime) Apply(ctx context.Context, plan runtime.Plan) (runtime.Result, error) {
 	desiredState := plan.Desired
 	scope := runtime.Scope{Application: desiredState.Application, Target: desiredState.Target}
@@ -41,22 +42,22 @@ func (r *Runtime) Apply(ctx context.Context, plan runtime.Plan) (runtime.Result,
 	var result runtime.Result
 	if err := applyObjects(ctx, &result, entries, desired.KindNetwork, desiredState.Networks,
 		func(n desired.Network) string { return n.Name },
-		r.createNetwork(plan), inPlaceUpdateError); err != nil {
+		r.createNetwork(plan), inPlaceUpdateError[desired.Network]); err != nil {
 		return result, err
 	}
 	if err := applyObjects(ctx, &result, entries, desired.KindConfig, desiredState.Configs,
 		func(c desired.Config) string { return c.Name },
-		r.createConfig(plan), immutableError); err != nil {
+		r.createConfig(plan), r.updateConfig(plan)); err != nil {
 		return result, err
 	}
 	if err := applyObjects(ctx, &result, entries, desired.KindSecret, desiredState.Secrets,
 		func(s desired.Secret) string { return s.Name },
-		createSecret, immutableError); err != nil {
+		createSecret, secretUpdateError); err != nil {
 		return result, err
 	}
 	if err := applyObjects(ctx, &result, entries, desired.KindVolume, desiredState.Volumes,
 		func(v desired.Volume) string { return v.Name },
-		r.createVolume(plan), inPlaceUpdateError); err != nil {
+		r.createVolume(plan), inPlaceUpdateError[desired.Volume]); err != nil {
 		return result, err
 	}
 	return result, nil
@@ -70,11 +71,11 @@ func (r *Runtime) Health(context.Context, runtime.Scope) (runtime.Health, error)
 }
 
 // applyObjects runs the plan entry of every managed object of one kind. A
-// Create calls create and records the key; an Update is refused by update.
-// Entries that are missing from the plan or marked Noop/Delete are skipped.
+// Create calls create and records the key; an Update calls update and records
+// it. Entries that are missing from the plan or marked Noop/Delete are skipped.
 func applyObjects[T desired.Managed](ctx context.Context, result *runtime.Result, entries map[string]runtime.Entry,
 	kind desired.Kind, objects []T, name func(T) string,
-	create func(context.Context, T) error, update func(runtime.Entry) error,
+	create func(context.Context, T) error, update func(context.Context, T, runtime.Entry) error,
 ) error {
 	for _, object := range objects {
 		if !object.Managed() {
@@ -89,7 +90,10 @@ func applyObjects[T desired.Managed](ctx context.Context, result *runtime.Result
 			}
 			result.Created = append(result.Created, key)
 		case runtime.Update:
-			return update(entry)
+			if err := update(ctx, object, entry); err != nil {
+				return err
+			}
+			result.Updated = append(result.Updated, key)
 		}
 	}
 	return nil
@@ -127,6 +131,40 @@ func (r *Runtime) createConfig(plan runtime.Plan) func(context.Context, desired.
 	}
 }
 
+// updateConfig changes the labels of an existing config with ConfigUpdate. Docker
+// rejects any change to the data, so a change to anything but labels is refused
+// before the API is called. The version comes from a fresh inspect: Docker
+// rejects the update if the config changed since the plan was made.
+func (r *Runtime) updateConfig(plan runtime.Plan) func(context.Context, desired.Config, runtime.Entry) error {
+	return func(ctx context.Context, config desired.Config, entry runtime.Entry) error {
+		for _, change := range entry.Changes {
+			if !strings.HasPrefix(change, "labels.") {
+				return fmt.Errorf("%s: config changes other than labels cannot be applied in place (%s); a content change must use a new name",
+					entry.Key, strings.Join(entry.Changes, ", "))
+			}
+		}
+
+		inspected, err := r.api.ConfigInspect(ctx, config.Name, client.ConfigInspectOptions{})
+		if err != nil {
+			return fmt.Errorf("inspect config %s: %w", config.Name, err)
+		}
+		_, err = r.api.ConfigUpdate(ctx, config.Name, client.ConfigUpdateOptions{
+			Version: inspected.Config.Version,
+			Spec: swarm.ConfigSpec{
+				Annotations: swarm.Annotations{
+					Name:   config.Name,
+					Labels: desired.MergeLabels(config.Labels, plan.Application, plan.Target),
+				},
+				Data: config.Data,
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("update config %s: %w", config.Name, err)
+		}
+		return nil
+	}
+}
+
 // createSecret always fails: the model carries no secret payload, and v0 only
 // references external secrets, so a managed one cannot be created yet.
 func createSecret(_ context.Context, secret desired.Secret) error {
@@ -152,12 +190,14 @@ func isService(key string) bool {
 	return strings.HasPrefix(key, string(desired.KindService)+"/")
 }
 
-func immutableError(entry runtime.Entry) error {
-	return fmt.Errorf("%s: configs and secrets are immutable (%s); a content change must use a new name",
+// secretUpdateError refuses secret updates. Secrets have no in-place update in
+// v0: Docker secrets are immutable, and the diff never asks for one.
+func secretUpdateError(_ context.Context, _ desired.Secret, entry runtime.Entry) error {
+	return fmt.Errorf("%s: secrets are immutable (%s); a content change must use a new name",
 		entry.Key, strings.Join(entry.Changes, ", "))
 }
 
-func inPlaceUpdateError(entry runtime.Entry) error {
+func inPlaceUpdateError[T any](_ context.Context, _ T, entry runtime.Entry) error {
 	return fmt.Errorf("%s: in-place update is not supported (%s); remove the object and create it again",
 		entry.Key, strings.Join(entry.Changes, ", "))
 }

@@ -46,7 +46,7 @@
       ],
       "configs": [
         {
-          "source": "wormcd_web_prod_nginx_5ca1958394ab",
+          "source": "wormcd_web_prod_nginx_56fccc8af6a7",
           "target": "/etc/nginx/nginx.conf",
           "mode": 292
         }
@@ -175,10 +175,10 @@
   ],
   "configs": [
     {
-      "name": "wormcd_web_prod_nginx_5ca1958394ab",
+      "name": "wormcd_web_prod_nginx_56fccc8af6a7",
       "source": "nginx",
       "file": "configs/nginx.conf",
-      "hash": "5ca1958394ab",
+      "hash": "56fccc8af6a7",
       "labels": {
         "com.wormcd.application": "web",
         "com.wormcd.target": "prod"
