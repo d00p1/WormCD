@@ -2,8 +2,6 @@ package manifest
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"os"
@@ -192,9 +190,39 @@ configs:
 	if first.Configs[0].Name == second.Configs[0].Name {
 		t.Fatalf("config name did not change: %q", first.Configs[0].Name)
 	}
-	want := sha256.Sum256([]byte("one"))
-	if got, wantHash := first.Configs[0].Hash, hex.EncodeToString(want[:])[:12]; got != wantHash {
-		t.Errorf("hash = %q, want %q", got, wantHash)
+	if got, want := first.Configs[0].Hash, configHash([]byte("one"), first.Configs[0].Labels); got != want {
+		t.Errorf("hash = %q, want %q", got, want)
+	}
+}
+
+func TestConfigLabelChangesName(t *testing.T) {
+	compose := func(team string) string {
+		return `services:
+  web:
+    image: ghcr.io/d00p1/web:v1
+    configs:
+      - source: app
+configs:
+  app:
+    file: app.conf
+    labels:
+      team: ` + team + `
+`
+	}
+	firstPath := writeApp(t, "", map[string]string{
+		"compose.yaml": compose("a"),
+		"app.conf":     "one",
+	})
+	secondPath := writeApp(t, "", map[string]string{
+		"compose.yaml": compose("b"),
+		"app.conf":     "one",
+	})
+
+	first := load(t, firstPath, "")
+	second := load(t, secondPath, "")
+
+	if first.Configs[0].Name == second.Configs[0].Name {
+		t.Fatalf("config name did not change with labels: %q", first.Configs[0].Name)
 	}
 }
 

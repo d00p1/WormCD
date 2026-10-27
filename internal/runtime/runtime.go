@@ -62,6 +62,19 @@ type Result struct {
 	Created []string `json:"created,omitempty"`
 }
 
+// PruneResult reports what Prune removed and which unwanted objects it left in
+// place. Skipped objects are not failures; the caller decides how to report them.
+type PruneResult struct {
+	Removed []string `json:"removed,omitempty"`
+	Skipped []Skip   `json:"skipped,omitempty"`
+}
+
+// Skip is an unwanted object that Prune left in place, with the reason.
+type Skip struct {
+	Key    string `json:"key"`
+	Reason string `json:"reason"`
+}
+
 // Health summarizes whether a target has converged. Problems lists the
 // reasons it has not.
 type Health struct {
@@ -74,6 +87,6 @@ type Runtime interface {
 	Kind() Kind
 	Inspect(ctx context.Context, scope Scope) (Observed, error)
 	Apply(ctx context.Context, plan Plan) (Result, error)
-	Prune(ctx context.Context, scope Scope, keep Set) error
+	Prune(ctx context.Context, scope Scope, keep Set) (PruneResult, error)
 	Health(ctx context.Context, scope Scope) (Health, error)
 }

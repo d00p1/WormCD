@@ -11,20 +11,23 @@ import (
 	"github.com/moby/moby/client"
 )
 
-// Apply creates the networks, volumes, configs and secrets that a plan asks
-// for. Entries with Noop or Delete actions do nothing here: deletions belong to
-// Prune, which runs after the services have moved off the old objects.
+// Apply creates the networks, configs, secrets and volumes that a plan asks
+// for, in that order. Entries with Noop or Delete actions do nothing here:
+// deletions belong to Prune, which runs after the services have moved off the
+// old objects.
 //
 // Configs and secrets are immutable. A content change arrives as a new name
 // (the hash is part of it), so an Update on them is an error, not a silent
 // in-place edit. Service changes are not applied until #18.
 func (r *Runtime) Apply(ctx context.Context, plan runtime.Plan) (runtime.Result, error) {
-	if err := validateScope(runtime.Scope{Application: plan.Application, Target: plan.Target}); err != nil {
+	desiredState := plan.Desired
+	scope := runtime.Scope{Application: desiredState.Application, Target: desiredState.Target}
+	if err := validateScope(scope); err != nil {
 		return runtime.Result{}, err
 	}
-	if plan.Desired.Application != plan.Application || plan.Desired.Target != plan.Target {
+	if plan.Application != scope.Application || plan.Target != scope.Target {
 		return runtime.Result{}, fmt.Errorf("plan desired state belongs to %s/%s, not %s/%s",
-			plan.Desired.Application, plan.Desired.Target, plan.Application, plan.Target)
+			scope.Application, scope.Target, plan.Application, plan.Target)
 	}
 
 	entries := make(map[string]runtime.Entry, len(plan.Entries))
@@ -36,95 +39,113 @@ func (r *Runtime) Apply(ctx context.Context, plan runtime.Plan) (runtime.Result,
 	}
 
 	var result runtime.Result
-	for _, network := range plan.Desired.Networks {
-		if !network.Managed() {
-			continue
-		}
-		key := desired.Key{Kind: desired.KindNetwork, Name: network.Name}.String()
-		switch entries[key].Action {
-		case runtime.Create:
-			_, err := r.api.NetworkCreate(ctx, network.Name, client.NetworkCreateOptions{
-				Driver:     network.Driver,
-				Options:    network.DriverOpts,
-				Internal:   network.Internal,
-				Attachable: network.Attachable,
-				Labels:     desired.MergeLabels(network.Labels, plan.Application, plan.Target),
-			})
-			if err != nil {
-				return result, fmt.Errorf("create network %s: %w", network.Name, err)
-			}
-			result.Created = append(result.Created, key)
-		case runtime.Update:
-			return result, inPlaceUpdateError(entries[key])
-		}
+	if err := applyObjects(ctx, &result, entries, desired.KindNetwork, desiredState.Networks,
+		func(n desired.Network) string { return n.Name },
+		r.createNetwork(plan), inPlaceUpdateError); err != nil {
+		return result, err
 	}
-
-	for _, config := range plan.Desired.Configs {
-		if !config.Managed() {
-			continue
-		}
-		key := desired.Key{Kind: desired.KindConfig, Name: config.Name}.String()
-		switch entries[key].Action {
-		case runtime.Create:
-			_, err := r.api.ConfigCreate(ctx, client.ConfigCreateOptions{Spec: swarm.ConfigSpec{
-				Annotations: swarm.Annotations{
-					Name:   config.Name,
-					Labels: desired.MergeLabels(config.Labels, plan.Application, plan.Target),
-				},
-				Data: config.Data,
-			}})
-			if err != nil {
-				return result, fmt.Errorf("create config %s: %w", config.Name, err)
-			}
-			result.Created = append(result.Created, key)
-		case runtime.Update:
-			return result, immutableError(entries[key])
-		}
+	if err := applyObjects(ctx, &result, entries, desired.KindConfig, desiredState.Configs,
+		func(c desired.Config) string { return c.Name },
+		r.createConfig(plan), immutableError); err != nil {
+		return result, err
 	}
-
-	for _, secret := range plan.Desired.Secrets {
-		if !secret.Managed() {
-			continue
-		}
-		key := desired.Key{Kind: desired.KindSecret, Name: secret.Name}.String()
-		switch entries[key].Action {
-		case runtime.Create:
-			// The model carries no secret payload: v0 only references external
-			// secrets, so a managed one cannot be created yet.
-			return result, fmt.Errorf("create secret %s: managed secrets are not supported in v0", secret.Name)
-		case runtime.Update:
-			return result, immutableError(entries[key])
-		}
+	if err := applyObjects(ctx, &result, entries, desired.KindSecret, desiredState.Secrets,
+		func(s desired.Secret) string { return s.Name },
+		createSecret, immutableError); err != nil {
+		return result, err
 	}
-
-	for _, volume := range plan.Desired.Volumes {
-		if !volume.Managed() {
-			continue
-		}
-		key := desired.Key{Kind: desired.KindVolume, Name: volume.Name}.String()
-		switch entries[key].Action {
-		case runtime.Create:
-			_, err := r.api.VolumeCreate(ctx, client.VolumeCreateOptions{
-				Name:       volume.Name,
-				Driver:     volume.Driver,
-				DriverOpts: volume.DriverOpts,
-				Labels:     desired.MergeLabels(volume.Labels, plan.Application, plan.Target),
-			})
-			if err != nil {
-				return result, fmt.Errorf("create volume %s: %w", volume.Name, err)
-			}
-			result.Created = append(result.Created, key)
-		case runtime.Update:
-			return result, inPlaceUpdateError(entries[key])
-		}
+	if err := applyObjects(ctx, &result, entries, desired.KindVolume, desiredState.Volumes,
+		func(v desired.Volume) string { return v.Name },
+		r.createVolume(plan), inPlaceUpdateError); err != nil {
+		return result, err
 	}
-
 	return result, nil
 }
 
-// Health is not implemented yet; it arrives with service support (#18).
+// Health is not implemented yet; it arrives with service support (#18). The
+// result is explicit about that, so the core can report the target as not
+// converged instead of failing.
 func (r *Runtime) Health(context.Context, runtime.Scope) (runtime.Health, error) {
-	return runtime.Health{}, fmt.Errorf("health: not implemented yet (see #18)")
+	return runtime.Health{Healthy: false, Problems: []string{"not implemented (see #18)"}}, nil
+}
+
+// applyObjects runs the plan entry of every managed object of one kind. A
+// Create calls create and records the key; an Update is refused by update.
+// Entries that are missing from the plan or marked Noop/Delete are skipped.
+func applyObjects[T desired.Managed](ctx context.Context, result *runtime.Result, entries map[string]runtime.Entry,
+	kind desired.Kind, objects []T, name func(T) string,
+	create func(context.Context, T) error, update func(runtime.Entry) error,
+) error {
+	for _, object := range objects {
+		if !object.Managed() {
+			continue
+		}
+		key := desired.Key{Kind: kind, Name: name(object)}.String()
+		entry := entries[key]
+		switch entry.Action {
+		case runtime.Create:
+			if err := create(ctx, object); err != nil {
+				return err
+			}
+			result.Created = append(result.Created, key)
+		case runtime.Update:
+			return update(entry)
+		}
+	}
+	return nil
+}
+
+func (r *Runtime) createNetwork(plan runtime.Plan) func(context.Context, desired.Network) error {
+	return func(ctx context.Context, network desired.Network) error {
+		_, err := r.api.NetworkCreate(ctx, network.Name, client.NetworkCreateOptions{
+			Driver:     network.Driver,
+			Options:    network.DriverOpts,
+			Internal:   network.Internal,
+			Attachable: network.Attachable,
+			Labels:     desired.MergeLabels(network.Labels, plan.Application, plan.Target),
+		})
+		if err != nil {
+			return fmt.Errorf("create network %s: %w", network.Name, err)
+		}
+		return nil
+	}
+}
+
+func (r *Runtime) createConfig(plan runtime.Plan) func(context.Context, desired.Config) error {
+	return func(ctx context.Context, config desired.Config) error {
+		_, err := r.api.ConfigCreate(ctx, client.ConfigCreateOptions{Spec: swarm.ConfigSpec{
+			Annotations: swarm.Annotations{
+				Name:   config.Name,
+				Labels: desired.MergeLabels(config.Labels, plan.Application, plan.Target),
+			},
+			Data: config.Data,
+		}})
+		if err != nil {
+			return fmt.Errorf("create config %s: %w", config.Name, err)
+		}
+		return nil
+	}
+}
+
+// createSecret always fails: the model carries no secret payload, and v0 only
+// references external secrets, so a managed one cannot be created yet.
+func createSecret(_ context.Context, secret desired.Secret) error {
+	return fmt.Errorf("create secret %s: managed secrets are not supported in v0", secret.Name)
+}
+
+func (r *Runtime) createVolume(plan runtime.Plan) func(context.Context, desired.Volume) error {
+	return func(ctx context.Context, volume desired.Volume) error {
+		_, err := r.api.VolumeCreate(ctx, client.VolumeCreateOptions{
+			Name:       volume.Name,
+			Driver:     volume.Driver,
+			DriverOpts: volume.DriverOpts,
+			Labels:     desired.MergeLabels(volume.Labels, plan.Application, plan.Target),
+		})
+		if err != nil {
+			return fmt.Errorf("create volume %s: %w", volume.Name, err)
+		}
+		return nil
+	}
 }
 
 func isService(key string) bool {

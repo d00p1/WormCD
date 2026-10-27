@@ -185,18 +185,29 @@ func (n *normalizer) config(key string, cfg types.ConfigObjConfig) (desired.Conf
 		return desired.Config{}, fmt.Errorf("config %q: one of file or content is required", key)
 	}
 
-	sum := sha256.Sum256(data)
-	hash := hex.EncodeToString(sum[:])[:12]
-
+	labels := desired.MergeLabels(cfg.Labels, n.app, n.target)
+	hash := configHash(data, labels)
 	base := firstNonEmpty(cfg.Name, n.namespace+"_"+key)
 	return desired.Config{
 		Name:   base + "_" + hash,
 		Source: key,
 		File:   file,
 		Hash:   hash,
-		Labels: desired.MergeLabels(cfg.Labels, n.app, n.target),
+		Labels: labels,
 		Data:   data,
 	}, nil
+}
+
+// configHash identifies a config by its content and labels. Docker cannot
+// update either in place, so a change to either must produce a new name.
+func configHash(data []byte, labels map[string]string) string {
+	h := sha256.New()
+	h.Write(data)
+	h.Write([]byte{0})
+	for _, key := range sortedKeys(labels) {
+		h.Write([]byte(key + "=" + labels[key] + "\n"))
+	}
+	return hex.EncodeToString(h.Sum(nil))[:12]
 }
 
 func (n *normalizer) secrets(project *types.Project) error {

@@ -80,7 +80,8 @@ func testKeep() runtime.Set {
 func TestPruneRemovesUnkeptManagedObjects(t *testing.T) {
 	fake := testPruneFake()
 
-	if err := newRuntime(fake).Prune(context.Background(), testPruneScope(), testKeep()); err != nil {
+	result, err := newRuntime(fake).Prune(context.Background(), testPruneScope(), testKeep())
+	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
 
@@ -88,14 +89,17 @@ func TestPruneRemovesUnkeptManagedObjects(t *testing.T) {
 		"NetworkRemove:id-old",
 		"ConfigRemove:id-" + testOldConfig,
 		"SecretRemove:id-managed",
-		"VolumeRemove:wormcd_web_prod_scratch",
 	}
 	if !slices.Equal(fake.calls, want) {
 		t.Fatalf("calls = %v, want %v", fake.calls, want)
 	}
+	wantRemoved := []string{"Network/wormcd_web_prod_old", "Config/" + testOldConfig, "Secret/managed_old"}
+	if !slices.Equal(result.Removed, wantRemoved) {
+		t.Fatalf("removed = %v, want %v", result.Removed, wantRemoved)
+	}
 
 	fake.calls = nil
-	if err := newRuntime(fake).Prune(context.Background(), testPruneScope(), testKeep()); err != nil {
+	if _, err := newRuntime(fake).Prune(context.Background(), testPruneScope(), testKeep()); err != nil {
 		t.Fatalf("second Prune: %v", err)
 	}
 	if len(fake.calls) != 0 {
@@ -103,16 +107,44 @@ func TestPruneRemovesUnkeptManagedObjects(t *testing.T) {
 	}
 }
 
-func TestPruneSkipsObjectsInUseByServices(t *testing.T) {
+func TestPruneNeverRemovesVolumes(t *testing.T) {
 	fake := testPruneFake()
 
-	if err := newRuntime(fake).Prune(context.Background(), testPruneScope(), testKeep()); err != nil {
+	result, err := newRuntime(fake).Prune(context.Background(), testPruneScope(), testKeep())
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+
+	for _, call := range fake.calls {
+		if strings.HasPrefix(call, "VolumeRemove:") {
+			t.Fatalf("Prune removed a volume: %s", call)
+		}
+	}
+	if len(fake.volumes.Items) != 3 {
+		t.Fatalf("volumes = %d, want all 3 to remain", len(fake.volumes.Items))
+	}
+	want := runtime.Skip{Key: "Volume/wormcd_web_prod_scratch", Reason: "volumes hold data and are never removed automatically; remove it manually if the data is no longer needed"}
+	if !slices.Contains(result.Skipped, want) {
+		t.Fatalf("skipped = %+v, want %+v", result.Skipped, want)
+	}
+}
+
+func TestPruneReportsObjectsInUseByServices(t *testing.T) {
+	fake := testPruneFake()
+
+	result, err := newRuntime(fake).Prune(context.Background(), testPruneScope(), testKeep())
+	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
 
 	for _, call := range fake.calls {
 		if strings.Contains(call, testBusyConfig) || strings.Contains(call, testUsedNetwork) {
 			t.Fatalf("Prune removed an object that a service still uses: %s", call)
+		}
+	}
+	for _, key := range []string{"Config/" + testBusyConfig, "Network/" + testUsedNetwork} {
+		if !slices.Contains(result.Skipped, runtime.Skip{Key: key, Reason: "in use by a service"}) {
+			t.Fatalf("skipped = %+v, want %s reported as in use", result.Skipped, key)
 		}
 	}
 }
@@ -122,7 +154,7 @@ func TestPruneRejectsUnkeptService(t *testing.T) {
 	keep := testKeep()
 	delete(keep, desired.Key{Kind: desired.KindService, Name: testService})
 
-	err := newRuntime(fake).Prune(context.Background(), testPruneScope(), keep)
+	_, err := newRuntime(fake).Prune(context.Background(), testPruneScope(), keep)
 	if err == nil || !strings.Contains(err.Error(), "#18") {
 		t.Fatalf("error = %v, want a not-implemented error for services", err)
 	}
@@ -132,7 +164,7 @@ func TestPruneRejectsUnkeptService(t *testing.T) {
 }
 
 func TestPruneRejectsEmptyScope(t *testing.T) {
-	err := newRuntime(&fakeAPI{}).Prune(context.Background(), runtime.Scope{}, testKeep())
+	_, err := newRuntime(&fakeAPI{}).Prune(context.Background(), runtime.Scope{}, testKeep())
 	if err == nil || !strings.Contains(err.Error(), "application and target are required") {
 		t.Fatalf("error = %v, want a scope validation error", err)
 	}

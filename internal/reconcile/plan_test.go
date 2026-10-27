@@ -339,3 +339,29 @@ func testService(name string) desired.Service {
 		Rollback: desired.DefaultUpdateConfig(),
 	}
 }
+
+func TestDiffNeverUpdatesConfigsOrSecrets(t *testing.T) {
+	desiredState := &desired.Desired{
+		Application: "web",
+		Target:      "prod",
+		Namespace:   "wormcd_web_prod",
+		Configs: []desired.Config{{
+			Name:   "wormcd_web_prod_nginx_abc",
+			Labels: desired.Labels("web", "prod"),
+		}},
+	}
+	observedState := runtime.Observed{
+		Application: "web",
+		Target:      "prod",
+		Namespace:   "wormcd_web_prod",
+		Configs: []desired.Config{{
+			Name:   "wormcd_web_prod_nginx_abc",
+			Labels: map[string]string{desired.LabelApplication: "web", desired.LabelTarget: "prod", "team": "a"},
+		}},
+	}
+
+	plan := Diff(desiredState, observedState)
+	if plan.Summary.Update != 0 {
+		t.Fatalf("summary = %+v, want no Update: configs are identified by a name that includes their labels", plan.Summary)
+	}
+}

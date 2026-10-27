@@ -173,8 +173,13 @@ type Runtime interface {
     Kind() Kind
     Inspect(ctx context.Context, scope Scope) (Observed, error)
     Apply(ctx context.Context, plan Plan) (Result, error)
-    Prune(ctx context.Context, app string, keep Set) error
-    Health(ctx context.Context, app string) (Health, error)
+    Prune(ctx context.Context, scope Scope, keep Set) (PruneResult, error)
+    Health(ctx context.Context, scope Scope) (Health, error)
+}
+
+type PruneResult struct {
+    Removed []string // ключи удалённых объектов
+    Skipped []Skip   // нежелательные объекты, которые Prune оставил, с причиной
 }
 
 type Desired struct {
@@ -194,10 +199,12 @@ Swarm-реализация:
 
 - `Inspect` — services/configs/secrets/networks/volumes, отфильтрованные по меткам;
 - `Apply` — создание сетей, создание configs/secrets, `ServiceUpdate` для сервисов;
-- configs/secrets иммутабельны: новое содержимое = новое имя с хешем, сервис переключается, старые удаляются после успешной сходимости;
+- configs/secrets иммутабельны: новое содержимое или новые labels = новое имя с хешем, сервис переключается, старые удаляются после успешной сходимости;
+- `Prune` удаляет networks, configs и secrets, которые не в `keep` и не используются сервисами. Пропущенные объекты попадают в `PruneResult.Skipped` с причиной;
+- volumes не удаляются автоматически: в них данные. Prune оставляет неиспользуемый volume и перечисляет его в `Skipped`; удаляет его человек;
 - `Health` — desired replicas vs running, статус update, ошибки задач; опционально HTTP-проба с control plane (у Swarm нет readiness).
 
-Порядок применения: `networks → configs/secrets → services (с учётом dependsOn) → prune`. Каждый шаг идемпотентен. Ошибка останавливает sync, target уходит в `Degraded`, предыдущая ревизия остаётся доступной для rollback.
+Порядок применения: `networks → configs/secrets → volumes → services (с учётом dependsOn) → prune`. Volumes создаются до сервисов, потому что сервисы их монтируют. Каждый шаг идемпотентен. Ошибка останавливает sync, target уходит в `Degraded`, предыдущая ревизия остаётся доступной для rollback.
 
 ## 6. Состояние и история
 
