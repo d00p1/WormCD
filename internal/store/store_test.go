@@ -567,3 +567,30 @@ func TestAddEvent(t *testing.T) {
 		t.Errorf("AddEvent with unknown revision: err = %v, want ErrNotFound", err)
 	}
 }
+
+func TestSetTargetState(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openTemp(t)
+
+	if err := s.SetTargetState(ctx, "web", "prod", StatusSynced, "", 0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("SetTargetState on missing target: err = %v, want ErrNotFound", err)
+	}
+
+	if _, err := s.EnsureTarget(ctx, "web", "prod", "local"); err != nil {
+		t.Fatalf("EnsureTarget: %v", err)
+	}
+	if err := s.SetTargetState(ctx, "web", "prod", StatusDegraded, "apply failed", 3); err != nil {
+		t.Fatalf("SetTargetState: %v", err)
+	}
+	got, err := s.Target(ctx, "web", "prod")
+	if err != nil {
+		t.Fatalf("Target: %v", err)
+	}
+	if got.Status != StatusDegraded || got.Message != "apply failed" || got.LastRevision != 3 {
+		t.Fatalf("target = %+v, want Degraded, message, last revision 3", got)
+	}
+
+	if err := s.SetTargetState(ctx, "web", "prod", Status("Healthy"), "", 3); err == nil {
+		t.Fatal("SetTargetState with unknown status: want error")
+	}
+}
