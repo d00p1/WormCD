@@ -16,6 +16,7 @@ func Diff(desiredState *desired.Desired, observedState runtime.Observed) runtime
 		Target:      desiredState.Target,
 		Namespace:   desiredState.Namespace,
 		Entries:     make([]runtime.Entry, 0, 16),
+		Desired:     *desiredState,
 	}
 
 	// Entries are grouped in dependency order, matching apply. Apply must

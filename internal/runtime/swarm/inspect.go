@@ -18,14 +18,32 @@ import (
 	"github.com/moby/moby/client"
 )
 
-// api is the subset of the Docker SDK used by Inspect. It exists so tests can
-// use a fake without a live daemon.
-type api interface {
+// readAPI is the subset of the Docker SDK used by Inspect. It exists so tests
+// can use a fake without a live daemon.
+type readAPI interface {
 	ServiceList(context.Context, client.ServiceListOptions) (client.ServiceListResult, error)
 	NetworkList(context.Context, client.NetworkListOptions) (client.NetworkListResult, error)
 	ConfigList(context.Context, client.ConfigListOptions) (client.ConfigListResult, error)
 	SecretList(context.Context, client.SecretListOptions) (client.SecretListResult, error)
 	VolumeList(context.Context, client.VolumeListOptions) (client.VolumeListResult, error)
+}
+
+// writeAPI is the subset of the Docker SDK used by Apply and Prune.
+type writeAPI interface {
+	NetworkCreate(context.Context, string, client.NetworkCreateOptions) (client.NetworkCreateResult, error)
+	NetworkRemove(context.Context, string, client.NetworkRemoveOptions) (client.NetworkRemoveResult, error)
+	ConfigCreate(context.Context, client.ConfigCreateOptions) (client.ConfigCreateResult, error)
+	ConfigRemove(context.Context, string, client.ConfigRemoveOptions) (client.ConfigRemoveResult, error)
+	SecretCreate(context.Context, client.SecretCreateOptions) (client.SecretCreateResult, error)
+	SecretRemove(context.Context, string, client.SecretRemoveOptions) (client.SecretRemoveResult, error)
+	VolumeCreate(context.Context, client.VolumeCreateOptions) (client.VolumeCreateResult, error)
+	VolumeRemove(context.Context, string, client.VolumeRemoveOptions) (client.VolumeRemoveResult, error)
+}
+
+// api is the full Docker surface of the runtime. Inspect only uses readAPI.
+type api interface {
+	readAPI
+	writeAPI
 }
 
 // Runtime reads Swarm state through the Docker Engine API.
@@ -50,8 +68,8 @@ func (r *Runtime) Kind() runtime.Kind {
 // Inspect returns the observed state owned by scope. It only performs
 // list operations and never mutates the cluster.
 func (r *Runtime) Inspect(ctx context.Context, scope runtime.Scope) (runtime.Observed, error) {
-	if scope.Application == "" || scope.Target == "" {
-		return runtime.Observed{}, fmt.Errorf("scope application and target are required")
+	if err := validateScope(scope); err != nil {
+		return runtime.Observed{}, err
 	}
 
 	services, err := r.api.ServiceList(ctx, client.ServiceListOptions{})
@@ -137,6 +155,13 @@ func (r *Runtime) Inspect(ctx context.Context, scope runtime.Scope) (runtime.Obs
 
 	observed.Sort()
 	return observed, nil
+}
+
+func validateScope(scope runtime.Scope) error {
+	if scope.Application == "" || scope.Target == "" {
+		return fmt.Errorf("scope application and target are required")
+	}
+	return nil
 }
 
 func inScope(labels map[string]string, scope runtime.Scope) bool {

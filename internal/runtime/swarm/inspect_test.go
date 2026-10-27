@@ -368,35 +368,6 @@ func TestMapUpdateDefaults(t *testing.T) {
 	}
 }
 
-type fakeAPI struct {
-	services client.ServiceListResult
-	networks client.NetworkListResult
-	configs  client.ConfigListResult
-	secrets  client.SecretListResult
-	volumes  client.VolumeListResult
-	err      error
-}
-
-func (f *fakeAPI) ServiceList(context.Context, client.ServiceListOptions) (client.ServiceListResult, error) {
-	return f.services, f.err
-}
-
-func (f *fakeAPI) NetworkList(context.Context, client.NetworkListOptions) (client.NetworkListResult, error) {
-	return f.networks, f.err
-}
-
-func (f *fakeAPI) ConfigList(context.Context, client.ConfigListOptions) (client.ConfigListResult, error) {
-	return f.configs, f.err
-}
-
-func (f *fakeAPI) SecretList(context.Context, client.SecretListOptions) (client.SecretListResult, error) {
-	return f.secrets, f.err
-}
-
-func (f *fakeAPI) VolumeList(context.Context, client.VolumeListOptions) (client.VolumeListResult, error) {
-	return f.volumes, f.err
-}
-
 func uint64Ptr(value uint64) *uint64 { return &value }
 
 func durationPtr(value time.Duration) *time.Duration { return &value }

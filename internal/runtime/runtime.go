@@ -47,9 +47,33 @@ func (o *Observed) Sort() {
 	desired.SortVolumes(o.Volumes)
 }
 
+// Set is a set of object keys. Prune uses it to decide which managed objects
+// must survive.
+type Set map[desired.Key]struct{}
+
+// Has reports whether the object of the given kind and name is in the set.
+func (s Set) Has(kind desired.Kind, name string) bool {
+	_, ok := s[desired.Key{Kind: kind, Name: name}]
+	return ok
+}
+
+// Result reports what Apply changed in the cluster.
+type Result struct {
+	Created []string `json:"created,omitempty"`
+}
+
+// Health summarizes whether a target has converged. Problems lists the
+// reasons it has not.
+type Health struct {
+	Healthy  bool     `json:"healthy"`
+	Problems []string `json:"problems,omitempty"`
+}
+
 // Runtime is the contract between the reconcile core and a container runtime.
-// M0 only needs to read state; Apply, Prune and Health arrive in M1.
 type Runtime interface {
 	Kind() Kind
 	Inspect(ctx context.Context, scope Scope) (Observed, error)
+	Apply(ctx context.Context, plan Plan) (Result, error)
+	Prune(ctx context.Context, scope Scope, keep Set) error
+	Health(ctx context.Context, scope Scope) (Health, error)
 }
