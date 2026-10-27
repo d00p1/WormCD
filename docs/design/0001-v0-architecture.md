@@ -207,11 +207,13 @@ Swarm-реализация:
 clusters(id, name, endpoint, ca_ref, cert_ref, key_ref, labels)
 sources(id, repo_url, branch, path, auth_ref)
 targets(id, app, target, cluster, last_revision, status, message)
-revisions(id, target_id, commit, rendered_spec, image_digests, created_at)
+revisions(id, target_id, number, commit, rendered_spec, image_digests, created_at)  -- UNIQUE(target_id, number)
 events(id, target_id, revision_id, type, payload, created_at)
 ```
 
-`revisions.rendered_spec` хранит полностью отрендеренный манифест — это основа diff-а и rollback без похода в git.
+`revisions.number` — порядковый номер ревизии внутри target (1, 2, …). Пара `(target_id, number)` уникальна. Номер, а не внутренний `id`, — то, чем оперирует пользователь: `rollback --revision N` и `history` ссылаются именно на него. UNIQUE не даёт двум параллельным sync выдать один номер.
+
+`revisions.rendered_spec` хранит полностью отрендеренный `Desired` в JSON — это основа diff-а и rollback без похода в git. Канонизацию делает вызывающий код: перед маршалом вызывается `Desired.Sort()`, поэтому одинаковый рендер даёт побайтово одинаковую запись. Store только проверяет, что это валидный JSON, и не зависит от `desired` (правило `.go-arch-lint.yml`).
 
 Статусы target: `Unknown`, `Synced`, `OutOfSync`, `Progressing`, `Healthy`, `Degraded`, `Blocked` (нет кластера/невалидный манифест).
 
