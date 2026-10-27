@@ -191,8 +191,7 @@ func validateService(service desired.Service, desiredState desired.Desired) erro
 	for _, ref := range service.Secrets {
 		ids.Secrets[ref.Source] = ref.Source
 	}
-	scope := runtime.Scope{Application: desiredState.Application, Target: desiredState.Target}
-	_, err := serviceSpec(service, scope, ids)
+	_, err := serviceSpec(service, scopeOf(desiredState), ids)
 	return err
 }
 

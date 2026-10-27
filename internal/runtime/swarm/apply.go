@@ -26,7 +26,7 @@ import (
 // error.
 func (r *Runtime) Apply(ctx context.Context, plan runtime.Plan) (runtime.Result, error) {
 	desiredState := plan.Desired
-	scope := runtime.Scope{Application: desiredState.Application, Target: desiredState.Target}
+	scope := scopeOf(desiredState)
 	if err := validateScope(scope); err != nil {
 		return runtime.Result{}, err
 	}
@@ -52,7 +52,7 @@ func (r *Runtime) Apply(ctx context.Context, plan runtime.Plan) (runtime.Result,
 	}
 	if err := applyObjects(ctx, &result, entries, desired.KindConfig, desiredState.Configs,
 		func(c desired.Config) string { return c.Name },
-		r.createConfig(scope), r.updateConfig(scope, r.api)); err != nil {
+		r.createConfig(scope), r.updateConfig(scope)); err != nil {
 		return result, err
 	}
 	if err := applyObjects(ctx, &result, entries, desired.KindSecret, desiredState.Secrets,
@@ -74,6 +74,11 @@ func (r *Runtime) Apply(ctx context.Context, plan runtime.Plan) (runtime.Result,
 		return result, err
 	}
 	return result, nil
+}
+
+// scopeOf is the target a desired state belongs to.
+func scopeOf(desiredState desired.Desired) runtime.Scope {
+	return runtime.Scope{Application: desiredState.Application, Target: desiredState.Target}
 }
 
 // preflight checks the whole plan before the first mutation, so a plan with an
@@ -208,13 +213,13 @@ func (r *Runtime) createConfig(scope runtime.Scope) func(context.Context, desire
 // before the API is called. The version is read from ConfigInspect at the moment
 // Apply runs, so a config changed between Plan and Apply is not detected: there is
 // no protection against that change.
-func (r *Runtime) updateConfig(scope runtime.Scope, reader configReader) func(context.Context, desired.Config, runtime.Entry) error {
+func (r *Runtime) updateConfig(scope runtime.Scope) func(context.Context, desired.Config, runtime.Entry) error {
 	return func(ctx context.Context, config desired.Config, entry runtime.Entry) error {
 		if err := configChangeError(entry); err != nil {
 			return err
 		}
 
-		inspected, err := reader.ConfigInspect(ctx, config.Name, client.ConfigInspectOptions{})
+		inspected, err := r.api.ConfigInspect(ctx, config.Name, client.ConfigInspectOptions{})
 		if err != nil {
 			return fmt.Errorf("inspect config %s: %w", config.Name, err)
 		}
