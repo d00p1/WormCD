@@ -47,6 +47,7 @@ type env struct {
 	svc  *Service
 	st   *store.Store
 	db   *sql.DB
+	dir  string
 	root string
 	fake *fakeRuntime
 }
@@ -71,12 +72,12 @@ func newEnv(t *testing.T) *env {
 	if err := os.Mkdir(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	e := &env{st: st, db: db, root: root, fake: newFakeRuntime()}
+	e := &env{st: st, db: db, dir: dir, root: root, fake: newFakeRuntime()}
 	writeFile(t, filepath.Join(root, "wormcd.yaml"), wormcdYAML)
 	e.setImage(t, imageV1)
 	e.svc = New(st, func(_ context.Context, _ string) (runtime.Runtime, error) {
 		return e.fake, nil
-	}, Config{Root: root})
+	}, Config{Root: root, DataDir: dir})
 	return e
 }
 
@@ -410,6 +411,10 @@ func TestSyncSucceededEventFailureReturnsRevision(t *testing.T) {
 	if number != 2 {
 		t.Fatalf("revision = %d, want 2: the revision is stored and must be reported", number)
 	}
+	var run *RunError
+	if !errors.As(err, &run) || run.Revision != 2 {
+		t.Fatalf("err = %v, want a RunError carrying revision 2", err)
+	}
 	e.assertState(t, "prod", store.StatusSynced, 2)
 }
 
@@ -428,6 +433,10 @@ func TestSyncStatusWriteFailureAfterRevisionDegrades(t *testing.T) {
 	}
 	if number != 2 {
 		t.Fatalf("returned revision = %d, want 2: the revision was recorded before the status write failed", number)
+	}
+	var run *RunError
+	if !errors.As(err, &run) || run.Revision != 2 || run.Stage != stageStatus {
+		t.Fatalf("err = %v, want a RunError at status carrying revision 2", err)
 	}
 
 	if n := e.revisionCount(t, "prod"); n != 2 {
@@ -472,8 +481,13 @@ func TestSyncInvalidManifestIsBlocked(t *testing.T) {
 	e := newEnv(t)
 	writeFile(t, filepath.Join(e.root, "wormcd.yaml"), "kind: [unterminated\n")
 
-	if _, err := e.svc.Sync(ctx, prod); err == nil {
+	_, err := e.svc.Sync(ctx, prod)
+	if err == nil {
 		t.Fatal("Sync: want render error")
+	}
+	var run *RunError
+	if !errors.As(err, &run) || run.Stage != StageRender {
+		t.Fatalf("Sync err = %v, want a RunError at the render stage", err)
 	}
 	e.assertState(t, "prod", store.StatusBlocked, 0)
 	if inspects, applies, _, _ := e.fake.calls(); inspects != 0 || applies != 0 {
@@ -482,6 +496,32 @@ func TestSyncInvalidManifestIsBlocked(t *testing.T) {
 	events := e.events(t, "prod")
 	if last := events[len(events)-1]; last.Type != EventSyncFailed || !strings.Contains(last.Payload, `"stage":"render"`) {
 		t.Fatalf("last event = %+v, want sync.failed at render", last)
+	}
+}
+
+func TestSyncUnknownTargetWritesNothing(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	typo := Ref{Application: "web", Target: "prdo"}
+
+	if _, err := e.svc.Sync(ctx, typo); !errors.Is(err, ErrUnknownTarget) {
+		t.Fatalf("Sync err = %v, want ErrUnknownTarget", err)
+	}
+	if _, err := e.st.Target(ctx, "web", "prdo"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("Target err = %v, want no row for the typo", err)
+	}
+	if n := len(e.events(t, "prdo")); n != 0 {
+		t.Fatalf("events = %d, want 0 for an undeclared target", n)
+	}
+	if inspects, applies, _, _ := e.fake.calls(); inspects != 0 || applies != 0 {
+		t.Fatalf("runtime touched: inspects=%d applies=%d", inspects, applies)
+	}
+}
+
+func TestSyncRejectsPathSeparatorInName(t *testing.T) {
+	e := newEnv(t)
+	if _, err := e.svc.Sync(context.Background(), Ref{Application: "web/x", Target: "prod"}); err == nil {
+		t.Fatal("Sync: want error for a name with a path separator")
 	}
 }
 

@@ -2,7 +2,13 @@ package reconcile
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
+	"syscall"
+	"time"
 )
 
 // Ref identifies a target by application and target name ("app/target"). See
@@ -13,6 +19,10 @@ type Ref struct {
 }
 
 func (r Ref) String() string { return r.Application + "/" + r.Target }
+
+// lockPollInterval is how often a run waits for a file lock held by another
+// process. flock cannot be waited on with a context, so the wait polls.
+const lockPollInterval = 100 * time.Millisecond
 
 // locks serializes operations on the same target within this process. Each
 // target has its own one-slot semaphore, so different targets never wait for
@@ -65,4 +75,62 @@ func (l *locks) slot(r Ref) chan struct{} {
 		l.slots[r] = slot
 	}
 	return slot
+}
+
+// fileLocks serializes operations on the same target across processes: the CLI
+// and the server are separate processes, so their in-process locks cannot see
+// each other. Each target has a flock on <dir>/<app>-<target>.lock. An empty dir
+// disables the file locks, which leaves only the in-process locks.
+type fileLocks struct {
+	dir string
+	// onWait, if set, is called once when acquire starts to wait for another
+	// process. Tests use it to know that a caller is waiting.
+	onWait func()
+}
+
+// acquire takes the file lock of r and returns the function that releases it.
+// If ctx ends while another process holds the lock, it returns ctx.Err() and
+// holds nothing.
+func (l *fileLocks) acquire(ctx context.Context, r Ref) (func(), error) {
+	if l.dir == "" {
+		return func() {}, nil
+	}
+	if err := os.MkdirAll(l.dir, 0o700); err != nil {
+		return nil, fmt.Errorf("lock %s: %w", r, err)
+	}
+	f, err := os.OpenFile(filepath.Join(l.dir, lockFileName(r)), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("lock %s: %w", r, err)
+	}
+	fd := int(f.Fd())
+	waited := false
+	for {
+		err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return func() {
+				_ = syscall.Flock(fd, syscall.LOCK_UN)
+				_ = f.Close()
+			}, nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			_ = f.Close()
+			return nil, fmt.Errorf("lock %s: %w", r, err)
+		}
+		if !waited && l.onWait != nil {
+			l.onWait()
+		}
+		waited = true
+		select {
+		case <-ctx.Done():
+			_ = f.Close()
+			return nil, ctx.Err()
+		case <-time.After(lockPollInterval):
+		}
+	}
+}
+
+// lockFileName is the file name of the lock of r. Names cannot contain a path
+// separator (see validateRef), so the name stays inside the lock directory.
+func lockFileName(r Ref) string {
+	return r.Application + "-" + r.Target + ".lock"
 }

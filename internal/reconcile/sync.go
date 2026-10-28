@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ type RuntimeFactory func(ctx context.Context, cluster string) (runtime.Runtime, 
 // reconcileStore is the part of *store.Store that reconcile uses. Tests wrap it
 // to make individual writes fail.
 type reconcileStore interface {
+	Target(ctx context.Context, application, target string) (store.Target, error)
 	EnsureTarget(ctx context.Context, application, target, cluster string) (store.Target, error)
 	SetTargetState(ctx context.Context, application, target string, status store.Status, message string, lastRevision int64) error
 	AddEvent(ctx context.Context, e store.Event) error
@@ -34,9 +36,13 @@ const DefaultSyncTimeout = 30 * time.Minute
 
 // Config sets up a Service. Root is the deploy repository checkout. SyncTimeout
 // is the deadline of one sync or rollback; zero means DefaultSyncTimeout.
+// DataDir is the directory of the database; its locks/ subdirectory holds the
+// locks that serialize runs across processes. Empty DataDir keeps the locks in
+// this process only.
 type Config struct {
 	Root        string
 	SyncTimeout time.Duration
+	DataDir     string
 }
 
 // finishTimeout bounds the writes that record a failed run. They ignore
@@ -48,14 +54,35 @@ const finishTimeout = 10 * time.Second
 // tells that deadline apart from a cancellation of the caller's context.
 var errSyncDeadline = errors.New("sync deadline")
 
+// ErrUnknownTarget is returned when the manifests under the checkout do not
+// declare the application or the target. Nothing is recorded for such a target.
+var ErrUnknownTarget = errors.New("unknown target")
+
+// RunError is a failed sync, rollback or status check. Stage names the step that
+// failed; it is empty when the run failed before a step, or in the write of the
+// success event. Revision is the revision the run recorded before it failed, or
+// 0: a sync that recorded revision N and then failed on its status or event
+// reports N, so the caller knows the revision exists.
+type RunError struct {
+	Stage    Stage
+	Revision int64
+	Err      error
+}
+
+func (e *RunError) Error() string { return e.Err.Error() }
+
+func (e *RunError) Unwrap() error { return e.Err }
+
 // Service runs sync, rollback and status for targets. Operations on one target
-// are serialized in this process (ADR-0007); different targets run in parallel.
+// are serialized in this process (ADR-0007) and across processes by a file lock
+// in the data directory; different targets run in parallel.
 type Service struct {
 	store       reconcileStore
 	runtimes    RuntimeFactory
 	root        string
 	syncTimeout time.Duration
 	locks       *locks
+	files       *fileLocks
 }
 
 // New returns a Service. Sync renders manifests from cfg.Root.
@@ -64,12 +91,17 @@ func New(st *store.Store, runtimes RuntimeFactory, cfg Config) *Service {
 	if timeout == 0 {
 		timeout = DefaultSyncTimeout
 	}
+	var dir string
+	if cfg.DataDir != "" {
+		dir = filepath.Join(cfg.DataDir, "locks")
+	}
 	return &Service{
 		store:       st,
 		runtimes:    runtimes,
 		root:        cfg.Root,
 		syncTimeout: timeout,
 		locks:       newLocks(),
+		files:       &fileLocks{dir: dir},
 	}
 }
 
@@ -95,8 +127,8 @@ type operation struct {
 }
 
 // source returns the desired state of the run and the cluster it targets. It
-// runs after the target is marked Progressing.
-type source func(ctx context.Context, target store.Target) (*desired.Desired, string, error)
+// runs under the target lock, before the run writes anything.
+type source func(ctx context.Context) (*desired.Desired, string, error)
 
 // Sync renders the target from the checkout, applies it to the cluster, prunes
 // and checks health, then records a revision. It returns the number of the new
@@ -110,7 +142,7 @@ func (s *Service) Sync(ctx context.Context, r Ref) (int64, error) {
 		failed:    EventSyncFailed,
 		message:   "sync started",
 	}
-	return s.execute(ctx, r, op, func(ctx context.Context, _ store.Target) (*desired.Desired, string, error) {
+	return s.execute(ctx, r, op, func(ctx context.Context) (*desired.Desired, string, error) {
 		return s.render(ctx, r)
 	})
 }
@@ -125,7 +157,7 @@ func (s *Service) Status(ctx context.Context, r Ref) (store.Status, error) {
 	}
 	state, cluster, err := s.render(ctx, r)
 	if err != nil {
-		return "", fmt.Errorf("status %s: render: %w", r, err)
+		return "", &RunError{Stage: StageRender, Err: fmt.Errorf("status %s: render: %w", r, err)}
 	}
 	rt, err := s.runtimes(ctx, cluster)
 	if err != nil {
@@ -142,10 +174,9 @@ func (s *Service) Status(ctx context.Context, r Ref) (store.Status, error) {
 }
 
 // execute is the run shared by Sync and Rollback: validate, take the target
-// lock, mark the target Progressing, get the desired state and converge.
-// The deadline starts once the lock is held, so waiting for another run on the
-// same target does not use up this run's time. Waiting itself honors the
-// caller's ctx.
+// lock, read the desired state, mark the target Progressing and converge. The
+// deadline starts once the lock is held, so waiting for another run on the same
+// target does not use up this run's time. Waiting itself honors the caller's ctx.
 func (s *Service) execute(ctx context.Context, r Ref, op operation, src source) (number int64, err error) {
 	if err := validateRef(r); err != nil {
 		return 0, err
@@ -155,6 +186,11 @@ func (s *Service) execute(ctx context.Context, r Ref, op operation, src source) 
 		return 0, runErr(op, r, err)
 	}
 	defer release()
+	unlock, err := s.files.acquire(ctx, r)
+	if err != nil {
+		return 0, runErr(op, r, err)
+	}
+	defer unlock()
 	ctx, cancel := context.WithTimeoutCause(ctx, s.syncTimeout, errSyncDeadline)
 	defer cancel()
 
@@ -163,44 +199,37 @@ func (s *Service) execute(ctx context.Context, r Ref, op operation, src source) 
 	var last int64
 	defer func() {
 		if p := recover(); p != nil {
-			number, err = 0, s.fail(ctx, r, op, store.StatusDegraded, stageRun, last, fmt.Errorf("panic: %v", p))
+			number, err = 0, s.fail(ctx, r, op, store.StatusDegraded, stageRun, last, 0, fmt.Errorf("panic: %v", p))
 		}
 	}()
 
-	// Without the target row there is nothing to record a failure on, so this
-	// error is returned as it is.
-	target, err := s.store.EnsureTarget(ctx, r.Application, r.Target, "")
+	// An undeclared target has no row, and nothing is written for it. The
+	// desired state is read before the row is created, so the cluster of the
+	// target is known when the row is written.
+	state, cluster, srcErr := src(ctx)
+	if errors.Is(srcErr, ErrUnknownTarget) {
+		return 0, runErr(op, r, srcErr)
+	}
+	target, err := s.store.EnsureTarget(ctx, r.Application, r.Target, cluster)
 	if err != nil {
 		return 0, runErr(op, r, err)
 	}
 	last = target.LastRevision
-	if err := s.store.SetTargetState(ctx, r.Application, r.Target, store.StatusProgressing, op.message, target.LastRevision); err != nil {
-		return 0, s.fail(ctx, r, op, store.StatusDegraded, stageProgress, target.LastRevision, err)
+	if err := s.store.SetTargetState(ctx, r.Application, r.Target, store.StatusProgressing, op.message, last); err != nil {
+		return 0, s.fail(ctx, r, op, store.StatusDegraded, stageProgress, last, 0, err)
 	}
 	if err := s.event(ctx, r, op.revision, op.started, op.message, "", ""); err != nil {
-		return 0, s.fail(ctx, r, op, store.StatusDegraded, stageStart, target.LastRevision, err)
+		return 0, s.fail(ctx, r, op, store.StatusDegraded, stageStart, last, 0, err)
 	}
 
-	state, cluster, err := src(ctx, target)
-	if err != nil {
-		return 0, s.fail(ctx, r, op, store.StatusBlocked, stageRender, target.LastRevision, err)
+	if srcErr != nil {
+		return 0, s.fail(ctx, r, op, store.StatusBlocked, StageRender, last, 0, srcErr)
 	}
-	// The row already exists, so the cluster is written only when it changed.
-	// The cluster is known only after the manifest is rendered, so a first sync
-	// writes it here.
-	if cluster != target.Cluster {
-		updated, err := s.store.EnsureTarget(ctx, r.Application, r.Target, cluster)
-		if err != nil {
-			return 0, s.fail(ctx, r, op, store.StatusDegraded, stageTarget, target.LastRevision, err)
-		}
-		target = updated
-	}
-
 	rt, err := s.runtimes(ctx, cluster)
 	if err != nil {
-		return 0, s.fail(ctx, r, op, store.StatusBlocked, stageRuntime, target.LastRevision, err)
+		return 0, s.fail(ctx, r, op, store.StatusBlocked, stageRuntime, last, 0, err)
 	}
-	return s.converge(ctx, r, op, state, rt, target.LastRevision)
+	return s.converge(ctx, r, op, state, rt, last)
 }
 
 // converge brings the cluster to state, prunes, checks health and records
@@ -208,27 +237,27 @@ func (s *Service) execute(ctx context.Context, r Ref, op operation, src source) 
 func (s *Service) converge(ctx context.Context, r Ref, op operation, state *desired.Desired, rt runtime.Runtime, last int64) (int64, error) {
 	plan, err := observe(ctx, r, state, rt)
 	if err != nil {
-		return 0, s.fail(ctx, r, op, store.StatusBlocked, stageInspect, last, err)
+		return 0, s.fail(ctx, r, op, store.StatusBlocked, stageInspect, last, 0, err)
 	}
 	if plan.HasChanges() {
 		if _, err := rt.Apply(ctx, plan); err != nil {
-			return 0, s.fail(ctx, r, op, store.StatusDegraded, stageApply, last, err)
+			return 0, s.fail(ctx, r, op, store.StatusDegraded, stageApply, last, 0, err)
 		}
 	}
 	if _, err := rt.Prune(ctx, scopeOf(r), keepSet(state)); err != nil {
-		return 0, s.fail(ctx, r, op, store.StatusDegraded, stagePrune, last, err)
+		return 0, s.fail(ctx, r, op, store.StatusDegraded, stagePrune, last, 0, err)
 	}
 
 	health, err := rt.Health(ctx, scopeOf(r))
 	if err != nil {
-		return 0, s.fail(ctx, r, op, store.StatusDegraded, stageHealth, last, err)
+		return 0, s.fail(ctx, r, op, store.StatusDegraded, stageHealth, last, 0, err)
 	}
 	if !health.Healthy {
 		cause := "not healthy"
 		if len(health.Problems) > 0 {
 			cause += ": " + strings.Join(health.Problems, "; ")
 		}
-		return 0, s.fail(ctx, r, op, store.StatusDegraded, stageHealth, last, errors.New(cause))
+		return 0, s.fail(ctx, r, op, store.StatusDegraded, stageHealth, last, 0, errors.New(cause))
 	}
 
 	number, err := s.store.AppendRevision(ctx, r.Application, r.Target, store.NewRevision{
@@ -236,18 +265,18 @@ func (s *Service) converge(ctx context.Context, r Ref, op operation, state *desi
 		ImageDigests: imageDigests(state),
 	})
 	if err != nil {
-		return 0, s.fail(ctx, r, op, store.StatusDegraded, stageRevision, last, err)
+		return 0, s.fail(ctx, r, op, store.StatusDegraded, stageRevision, last, 0, err)
 	}
 	if err := s.store.SetTargetState(ctx, r.Application, r.Target, store.StatusSynced, "", number); err != nil {
 		// The revision is recorded and stays. The status says so, because it
 		// could not be updated to Synced.
 		cause := fmt.Errorf("revision %d recorded but status not updated: %w", number, err)
-		return number, s.fail(ctx, r, op, store.StatusDegraded, stageStatus, number, cause)
+		return number, s.fail(ctx, r, op, store.StatusDegraded, stageStatus, number, number, cause)
 	}
 	// The revision and the Synced status are already stored, so the number is
 	// returned with the error: the caller learns that the revision exists.
 	if err := s.event(ctx, r, number, op.succeeded, op.successMessage(number), "", ""); err != nil {
-		return number, runErr(op, r, err)
+		return number, &RunError{Revision: number, Err: fmt.Errorf("%s %s: %w", op.kind, r, err)}
 	}
 	return number, nil
 }
@@ -263,16 +292,26 @@ func observe(ctx context.Context, r Ref, state *desired.Desired, rt runtime.Runt
 }
 
 // render loads the desired state of r from the checkout and returns the
-// cluster the target declares.
+// cluster the target declares. A target the manifests do not declare wraps
+// ErrUnknownTarget.
 func (s *Service) render(ctx context.Context, r Ref) (*desired.Desired, string, error) {
-	return manifest.LoadWithCluster(ctx, manifest.Options{App: r.String(), Root: s.root})
+	state, cluster, err := manifest.LoadWithCluster(ctx, manifest.Options{App: r.String(), Root: s.root})
+	if errors.Is(err, manifest.ErrNotDeclared) {
+		return nil, "", fmt.Errorf("%w: %w", ErrUnknownTarget, err)
+	}
+	return state, cluster, err
 }
 
 // fail records a failed run: target status, message and failure event. The
 // returned error carries the stage and the cause. Store errors are joined to it
-// so that a failed record is not lost.
-func (s *Service) fail(ctx context.Context, r Ref, op operation, status store.Status, stage Stage, last int64, cause error) error {
-	err := runErr(op, r, fmt.Errorf("%s: %w", stage, s.interrupted(ctx, op, cause)))
+// so that a failed record is not lost. last is the revision the target keeps;
+// revision is the one this run recorded, 0 if none.
+func (s *Service) fail(ctx context.Context, r Ref, op operation, status store.Status, stage Stage, last, revision int64, cause error) error {
+	err := &RunError{
+		Stage:    stage,
+		Revision: revision,
+		Err:      fmt.Errorf("%s %s: %s: %w", op.kind, r, stage, s.interrupted(ctx, op, cause)),
+	}
 	// The run may have failed because ctx was canceled, so the failure is
 	// written with a context that ignores cancellation.
 	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finishTimeout)
@@ -294,9 +333,9 @@ func (s *Service) interrupted(ctx context.Context, op operation, cause error) er
 	return fmt.Errorf("%s canceled by caller: %w", op.kind, cause)
 }
 
-// runErr prefixes err with the run's kind and target.
+// runErr wraps err in a RunError that names the run's kind and target.
 func runErr(op operation, r Ref, err error) error {
-	return fmt.Errorf("%s %s: %w", op.kind, r, err)
+	return &RunError{Err: fmt.Errorf("%s %s: %w", op.kind, r, err)}
 }
 
 func (s *Service) event(ctx context.Context, r Ref, revision int64, typ EventType, message string, stage Stage, cause string) error {
@@ -316,9 +355,14 @@ func (op operation) successMessage(number int64) string {
 	return fmt.Sprintf("sync succeeded as revision %d", number)
 }
 
+// validateRef rejects names that are empty or contain a path separator: the
+// names become a lock file name in the data directory.
 func validateRef(r Ref) error {
 	if r.Application == "" || r.Target == "" {
 		return fmt.Errorf("target %q must be in app/target form", r)
+	}
+	if strings.ContainsAny(r.Application+r.Target, `/\`) {
+		return fmt.Errorf("target %q must not contain a path separator", r)
 	}
 	return nil
 }

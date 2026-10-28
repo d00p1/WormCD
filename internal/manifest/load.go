@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -138,6 +139,11 @@ func resolveOptions(opts Options) (file, target string, err error) {
 	}
 }
 
+// ErrNotDeclared is returned when the application or the target is not in the
+// manifests under the root. The manifests are the source of truth, so an
+// undeclared name is not an invalid manifest.
+var ErrNotDeclared = errors.New("not declared in the manifests")
+
 func findApplication(root, name string) (string, error) {
 	var found []string
 	var invalid []string
@@ -172,7 +178,7 @@ func findApplication(root, name string) (string, error) {
 		if len(invalid) > 0 {
 			return "", fmt.Errorf("application %q not found under %s (invalid manifests: %s)", name, root, strings.Join(invalid, "; "))
 		}
-		return "", fmt.Errorf("application %q not found under %s", name, root)
+		return "", fmt.Errorf("%w: application %q not found under %s", ErrNotDeclared, name, root)
 	case 1:
 		return found[0], nil
 	default:

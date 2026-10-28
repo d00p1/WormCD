@@ -127,7 +127,7 @@ func (a *Application) selectTarget(name string) (Target, error) {
 				return t, nil
 			}
 		}
-		return Target{}, fmt.Errorf("target %q not found (available: %s)", name, a.targetNames())
+		return Target{}, fmt.Errorf("%w: target %q not found (available: %s)", ErrNotDeclared, name, a.targetNames())
 	}
 	if len(a.Spec.Targets) == 1 {
 		return a.Spec.Targets[0], nil
