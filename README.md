@@ -86,6 +86,11 @@ Apply and inspect history (needs a SQLite database with `--data`):
 are served by `wormcd server` under `/api/v1/apps/{app}/targets/{target}`. The
 API listens on loopback only in M1 and has no authentication yet.
 
+`sync`, `rollback` and `server` lock each target across processes with a `flock`
+on a file in `locks/`, next to the database. A CLI run waits for a server run on
+the same target, and the other way round, as long as both use the same database
+directory on one host. `server` requires `--data`.
+
 Unit tests are hermetic. Docker integration tests are opt-in:
 
 ```sh

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"net/http"
 	"net/http/httptest"
@@ -307,6 +308,40 @@ func assertAPIMatchesCLI(t *testing.T, data, root string, rt *memRuntime) {
 	rec = get("/api/v1/apps/web/targets/missing")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("GET unknown target: %d, want 404", rec.Code)
+	}
+}
+
+func TestWithRecordedNamesRevision(t *testing.T) {
+	base := errors.New("sync web/prod: status: write failed")
+	if got := withRecorded(base, 0); got != base {
+		t.Fatalf("no revision: err = %v, want the error unchanged", got)
+	}
+	got := withRecorded(base, 4)
+	if !errors.Is(got, base) || !strings.Contains(got.Error(), "revision 4 was recorded") {
+		t.Fatalf("err = %v, want the cause and revision 4", got)
+	}
+}
+
+func TestSyncUnknownTargetLeavesNoRow(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "repo")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := filepath.Join(dir, "wormcd.db")
+	writeCheckout(t, root, "ghcr.io/d00p1/web:v1")
+
+	err := runSyncWith([]string{"web/typo", "--root", root, "--data", data}, &bytes.Buffer{}, testRuntimes(newMemRuntime()))
+	if err == nil || !strings.Contains(err.Error(), "not declared in the manifests") {
+		t.Fatalf("error = %v, want the undeclared target error", err)
+	}
+	cp, closeCP, err := openControlPlane(context.Background(), data, root, testRuntimes(newMemRuntime()))
+	if err != nil {
+		t.Fatalf("openControlPlane: %v", err)
+	}
+	defer closeCP()
+	if _, err := cp.store.Target(context.Background(), "web", "typo"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("Target err = %v, want no row for the typo", err)
 	}
 }
 

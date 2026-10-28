@@ -107,10 +107,14 @@ func runServer(args []string) error {
 	defer closeCP()
 	slog.Info("store opened", "path", *data)
 
+	// WriteTimeout stays unset: a sync answers only after it has converged,
+	// which can take longer than any fixed write deadline.
 	srv := &http.Server{
 		Addr:              *listen,
 		Handler:           api.New(cp.svc, cp.store).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	errCh := make(chan error, 1)

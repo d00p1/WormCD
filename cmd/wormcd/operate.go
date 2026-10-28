@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -83,7 +84,7 @@ func openControlPlane(ctx context.Context, data, root string, runtimes runtimePr
 		return nil, nil, err
 	}
 	cp := &controlPlane{
-		svc:   reconcile.New(st, factory, reconcile.Config{Root: root}),
+		svc:   reconcile.New(st, factory, reconcile.Config{Root: root, DataDir: filepath.Dir(data)}),
 		store: st,
 	}
 	closeAll := func() {
@@ -117,7 +118,7 @@ func runSyncWith(args []string, stdout io.Writer, runtimes runtimeProvider) erro
 
 	number, err := cp.svc.Sync(ctx, ref)
 	if err != nil {
-		return err
+		return withRecorded(err, number)
 	}
 	view := api.RunView{Application: ref.Application, Target: ref.Target, Revision: number}
 	return writeResult(stdout, *output, view, func(w io.Writer) {
@@ -238,7 +239,7 @@ func runRollbackWith(args []string, stdout io.Writer, runtimes runtimeProvider) 
 
 	number, err := cp.svc.Rollback(ctx, ref, *revision)
 	if err != nil {
-		return err
+		return withRecorded(err, number)
 	}
 	view := api.RunView{Application: ref.Application, Target: ref.Target, Revision: number}
 	return writeResult(stdout, *output, view, func(w io.Writer) {
@@ -297,6 +298,15 @@ func parseRef(name, s string) (reconcile.Ref, error) {
 		return reconcile.Ref{}, fmt.Errorf("%s: target %q must be in app/target form", name, s)
 	}
 	return reconcile.Ref{Application: app, Target: target}, nil
+}
+
+// withRecorded tells the operator about a revision that a failed run recorded
+// before it failed. Such a revision exists, and the target keeps it as its last.
+func withRecorded(err error, number int64) error {
+	if number == 0 {
+		return err
+	}
+	return fmt.Errorf("%w; revision %d was recorded", err, number)
 }
 
 // writeResult prints v as JSON for output "json" and calls human otherwise.
