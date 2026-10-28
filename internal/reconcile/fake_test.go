@@ -20,6 +20,7 @@ type fakeRuntime struct {
 	applyErr   error
 	applyPanic any
 	healthErr  error
+	inspectErr error
 
 	// gates blocks Apply for a target until the channel is closed or the context
 	// ends. entered receives the target name when Apply starts blocking.
@@ -52,6 +53,9 @@ func (f *fakeRuntime) Inspect(_ context.Context, scope runtime.Scope) (runtime.O
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.inspects++
+	if f.inspectErr != nil {
+		return runtime.Observed{}, f.inspectErr
+	}
 	f.inFlight[scope.Target]++
 	if f.inFlight[scope.Target] > f.maxInFlight[scope.Target] {
 		f.maxInFlight[scope.Target] = f.inFlight[scope.Target]

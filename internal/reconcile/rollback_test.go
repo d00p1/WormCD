@@ -127,6 +127,8 @@ func TestRollbackRejectsCorruptedSpec(t *testing.T) {
 
 	if _, err := e.svc.Rollback(ctx, prod, 1); err == nil || !strings.Contains(err.Error(), "is corrupted") {
 		t.Fatalf("Rollback err = %v, want the corrupted revision error", err)
+	} else if !errors.Is(err, ErrCorruptRevision) {
+		t.Fatalf("Rollback err = %v, want ErrCorruptRevision", err)
 	}
 	if a, p := mutations(e.fake); a != applies || p != prunes {
 		t.Fatalf("runtime mutated: applies %d->%d, prunes %d->%d", applies, a, prunes, p)

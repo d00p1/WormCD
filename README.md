@@ -52,7 +52,7 @@ mise run fix              # apply safe autofixes, then review the diff
 ```sh
 make build
 ./bin/wormcd version
-./bin/wormcd server --listen :8080   # GET /healthz
+./bin/wormcd server --data wormcd.db --root /path/to/deploy-repo   # 127.0.0.1:8080
 ```
 
 Render an application from a deploy repository (read-only, no cluster needed):
@@ -72,6 +72,44 @@ Plan a target against a Swarm cluster (read-only):
 `diff` is read-only and, until the cluster registry arrives in M2, connects to
 the local Docker socket (`unix:///var/run/docker.sock`). Exit codes: `0` — no
 differences, `2` — the plan has changes, `1` — error.
+
+Apply and inspect history (needs a SQLite database with `--data`):
+
+```sh
+./bin/wormcd sync web/staging --root /path/to/deploy-repo --data wormcd.db
+./bin/wormcd status web/staging --root /path/to/deploy-repo --data wormcd.db
+./bin/wormcd history web/staging --data wormcd.db
+./bin/wormcd rollback web/staging --revision 3 --root /path/to/deploy-repo --data wormcd.db
+```
+
+`sync` applies the plan at once; use `diff` to preview it. The same operations
+are served by `wormcd server` under `/api/v1/apps/{app}/targets/{target}`. The
+API listens on loopback only in M1 and has no authentication yet. Every POST needs
+a JSON Content-Type:
+
+```sh
+curl -X POST -H 'Content-Type: application/json' \
+  http://127.0.0.1:8080/api/v1/apps/web/targets/staging/sync
+curl -X POST -H 'Content-Type: application/json' -d '{"revision":3}' \
+  http://127.0.0.1:8080/api/v1/apps/web/targets/staging/rollback
+```
+
+`sync`, `rollback` and `server` lock each target across processes with a `flock`
+on a file in `locks/`, next to the database. A CLI run waits for a server run on
+the same target, and the other way round, as long as both use the same database
+directory on one host. `server` requires `--data`.
+
+A run waits at most `--lock-timeout` for another run on the same target. The
+default is `30s`, and the value must be positive. When the target stays locked
+for that long, the run fails without writing anything: `sync` and `rollback`
+exit with `1` and the API answers `409` with reason `sync_in_progress`. The
+timeout covers only the wait; the run's own deadline starts once it holds the lock.
+
+Known limits in M1:
+
+- `history` lists only successful revisions, and their commit field is empty until M2. Failed attempts are only in the `events` table, which neither the CLI nor the API shows.
+- A SIGTERM during a run can leave the target `Progressing` until the next manual `sync`.
+- Lock files named `<app>-<target>.lock` from earlier builds in `locks/` are harmless and can be deleted.
 
 Unit tests are hermetic. Docker integration tests are opt-in:
 

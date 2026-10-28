@@ -265,6 +265,7 @@ Control plane (ADR-0006) запускается сервисом с одной �
 GET    /api/v1/apps
 GET    /api/v1/apps/{app}
 GET    /api/v1/apps/{app}/targets/{target}
+GET    /api/v1/apps/{app}/targets/{target}/status   # M1: stored target + live drift check
 POST   /api/v1/apps/{app}/targets/{target}/sync
 POST   /api/v1/apps/{app}/targets/{target}/rollback
 GET    /api/v1/apps/{app}/targets/{target}/history
@@ -285,7 +286,26 @@ wormcd history web/prod
 wormcd rollback web/prod --revision 42
 ```
 
-Аутентификация API в v0 — bearer token. OIDC и RBAC — позже.
+Аутентификация API в v0 — bearer token. M1: без токена, только loopback (ADR-0007). OIDC и RBAC — позже.
+
+Коды ошибок API (`writeError` в `internal/api/server.go`):
+
+| Код | `reason` | Когда |
+|---|---|---|
+| 400 | `invalid_ref` | имя не является именем target: пустое или содержит `/` или `\` |
+| 400 | — | тело запроса не JSON, содержит лишние поля или `revision` меньше 1 |
+| 403 | — | Host или Origin не loopback |
+| 404 | `not_found` | target или ревизия не найдены; приложение или target не объявлены в манифестах |
+| 415 | — | POST без `Content-Type: application/json` |
+| 422 | `invalid_manifest` | манифесты не разбираются, не валидируются или не рендерятся |
+| 422 | `corrupt_revision` | сохранённая ревизия не читается так, как была отрендерена |
+| 409 | `sync_in_progress` | target занят другим run дольше `LockWait` (`--lock-timeout`, по умолчанию 30 с); run не начинался, ничего не записано, сообщение «target is locked by another run» |
+| 500 | `sync_failed` | run упал на кластере, в store или при чтении checkout; `revision` в теле, если ревизия уже записана |
+| 500 | `internal` | прочие ошибки |
+
+Приложение, которого нет в манифестах, при этом в checkout есть невалидный `wormcd.yaml`, тоже получает 404 `not_found`: имя нельзя проверить, поэтому ничего не записывается и lock не берётся. Поэтому битый манифест целевого приложения даёт 404, а не 422, пока его имя нельзя прочитать.
+
+`rollback` не проверяет объявленность target по манифестам, в отличие от `sync`. Он берёт спеку из сохранённой ревизии, а ревизия есть только у target, который уже синхронизировался. Поведение оставлено как есть: откат не требует, чтобы checkout совпадал с манифестами на момент отката.
 
 ## 9. Этапы
 

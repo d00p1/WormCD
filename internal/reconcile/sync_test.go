@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/d00p1/wormcd/internal/desired"
 	"github.com/d00p1/wormcd/internal/runtime"
 	"github.com/d00p1/wormcd/internal/store"
 	_ "modernc.org/sqlite"
@@ -47,6 +49,7 @@ type env struct {
 	svc  *Service
 	st   *store.Store
 	db   *sql.DB
+	dir  string
 	root string
 	fake *fakeRuntime
 }
@@ -71,12 +74,12 @@ func newEnv(t *testing.T) *env {
 	if err := os.Mkdir(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	e := &env{st: st, db: db, root: root, fake: newFakeRuntime()}
+	e := &env{st: st, db: db, dir: dir, root: root, fake: newFakeRuntime()}
 	writeFile(t, filepath.Join(root, "wormcd.yaml"), wormcdYAML)
 	e.setImage(t, imageV1)
 	e.svc = New(st, func(_ context.Context, _ string) (runtime.Runtime, error) {
 		return e.fake, nil
-	}, Config{Root: root})
+	}, Config{Root: root, DataDir: dir})
 	return e
 }
 
@@ -315,6 +318,34 @@ func TestSyncDeadlineExceededDuringApplyDegrades(t *testing.T) {
 	}
 }
 
+func TestSyncUnknownAppWithInvalidNeighbourWritesNothing(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	neighbour := filepath.Join(e.root, "other")
+	if err := os.Mkdir(neighbour, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(neighbour, "wormcd.yaml"), "kind: [\n")
+	ghost := Ref{Application: "ghost", Target: "prod"}
+
+	if _, err := e.svc.Sync(ctx, ghost); !errors.Is(err, ErrUnknownTarget) {
+		t.Fatalf("Sync err = %v, want ErrUnknownTarget", err)
+	}
+	if _, err := e.st.Target(ctx, "ghost", "prod"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("Target err = %v, want ErrNotFound: nothing is recorded", err)
+	}
+	if _, ok := e.svc.locks.slots[ghost]; ok {
+		t.Fatal("a lock slot was created for an undeclared target")
+	}
+	entries, err := os.ReadDir(filepath.Join(e.dir, "locks"))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("lock files = %d, want 0 for an undeclared target", len(entries))
+	}
+}
+
 func TestSyncPanicInRuntimeDegrades(t *testing.T) {
 	ctx := context.Background()
 	e := newEnv(t)
@@ -337,11 +368,15 @@ func TestSyncPanicInRuntimeDegrades(t *testing.T) {
 // passes everything else to the real store.
 type failingStore struct {
 	reconcileStore
-	failStatuses []store.Status
-	failEvents   []EventType
+	failStatuses  []store.Status
+	panicStatuses []store.Status
+	failEvents    []EventType
 }
 
 func (f failingStore) SetTargetState(ctx context.Context, application, target string, status store.Status, message string, lastRevision int64) error {
+	if slices.Contains(f.panicStatuses, status) {
+		panic("injected: set status")
+	}
 	if slices.Contains(f.failStatuses, status) {
 		return errors.New("injected: set status")
 	}
@@ -410,6 +445,10 @@ func TestSyncSucceededEventFailureReturnsRevision(t *testing.T) {
 	if number != 2 {
 		t.Fatalf("revision = %d, want 2: the revision is stored and must be reported", number)
 	}
+	var run *RunError
+	if !errors.As(err, &run) || run.Revision != 2 {
+		t.Fatalf("err = %v, want a RunError carrying revision 2", err)
+	}
 	e.assertState(t, "prod", store.StatusSynced, 2)
 }
 
@@ -428,6 +467,10 @@ func TestSyncStatusWriteFailureAfterRevisionDegrades(t *testing.T) {
 	}
 	if number != 2 {
 		t.Fatalf("returned revision = %d, want 2: the revision was recorded before the status write failed", number)
+	}
+	var run *RunError
+	if !errors.As(err, &run) || run.Revision != 2 || run.Stage != stageStatus {
+		t.Fatalf("err = %v, want a RunError at status carrying revision 2", err)
 	}
 
 	if n := e.revisionCount(t, "prod"); n != 2 {
@@ -470,10 +513,15 @@ func TestSyncUnhealthyDegradesWithoutRevision(t *testing.T) {
 func TestSyncInvalidManifestIsBlocked(t *testing.T) {
 	ctx := context.Background()
 	e := newEnv(t)
-	writeFile(t, filepath.Join(e.root, "wormcd.yaml"), "kind: [unterminated\n")
+	writeFile(t, filepath.Join(e.root, "compose.yaml"), "services: [unterminated\n")
 
-	if _, err := e.svc.Sync(ctx, prod); err == nil {
+	_, err := e.svc.Sync(ctx, prod)
+	if err == nil {
 		t.Fatal("Sync: want render error")
+	}
+	var run *RunError
+	if !errors.As(err, &run) || run.Stage != StageRender {
+		t.Fatalf("Sync err = %v, want a RunError at the render stage", err)
 	}
 	e.assertState(t, "prod", store.StatusBlocked, 0)
 	if inspects, applies, _, _ := e.fake.calls(); inspects != 0 || applies != 0 {
@@ -482,6 +530,32 @@ func TestSyncInvalidManifestIsBlocked(t *testing.T) {
 	events := e.events(t, "prod")
 	if last := events[len(events)-1]; last.Type != EventSyncFailed || !strings.Contains(last.Payload, `"stage":"render"`) {
 		t.Fatalf("last event = %+v, want sync.failed at render", last)
+	}
+}
+
+func TestSyncUnknownTargetWritesNothing(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	typo := Ref{Application: "web", Target: "prdo"}
+
+	if _, err := e.svc.Sync(ctx, typo); !errors.Is(err, ErrUnknownTarget) {
+		t.Fatalf("Sync err = %v, want ErrUnknownTarget", err)
+	}
+	if _, err := e.st.Target(ctx, "web", "prdo"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("Target err = %v, want no row for the typo", err)
+	}
+	if n := len(e.events(t, "prdo")); n != 0 {
+		t.Fatalf("events = %d, want 0 for an undeclared target", n)
+	}
+	if inspects, applies, _, _ := e.fake.calls(); inspects != 0 || applies != 0 {
+		t.Fatalf("runtime touched: inspects=%d applies=%d", inspects, applies)
+	}
+}
+
+func TestSyncRejectsPathSeparatorInName(t *testing.T) {
+	e := newEnv(t)
+	if _, err := e.svc.Sync(context.Background(), Ref{Application: "web/x", Target: "prod"}); err == nil {
+		t.Fatal("Sync: want error for a name with a path separator")
 	}
 }
 
@@ -576,6 +650,104 @@ func TestSyncWaitsForTargetLock(t *testing.T) {
 	}
 }
 
+// contender returns the service of a second run of prod: the service of e in
+// the same process, or one that stands for another process on the same data.
+func (e *env) contender(cross bool) *Service {
+	if cross {
+		return e.otherProcess()
+	}
+	return e.svc
+}
+
+// onWait returns a channel that gets a value when a run of svc starts waiting
+// for the lock of the target, in this process or in another one.
+func onWait(svc *Service, cross bool) chan struct{} {
+	waiting := make(chan struct{}, 1)
+	hook := func() { waiting <- struct{}{} }
+	if cross {
+		svc.files.onWait = hook
+	} else {
+		svc.locks.onWait = hook
+	}
+	return waiting
+}
+
+func TestSyncGivesUpWhenTargetStaysLocked(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cross bool
+	}{{"same process", false}, {"other process", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			e := newEnv(t)
+			gate := make(chan struct{})
+			e.fake.gates["prod"] = gate
+			e.fake.entered = make(chan string, 1)
+			first := syncAsync(e.svc, ctx, prod)
+			t.Cleanup(func() {
+				close(gate)
+				<-first
+			})
+			<-e.fake.entered
+
+			svc := e.contender(tc.cross)
+			svc.lockWait = 50 * time.Millisecond
+			eventsBefore := len(e.events(t, "prod"))
+			inspectsBefore, _, _, _ := e.fake.calls()
+
+			_, err := svc.Sync(ctx, prod)
+			if !errors.Is(err, ErrLockBusy) {
+				t.Fatalf("Sync err = %v, want ErrLockBusy", err)
+			}
+			if inspects, _, _, _ := e.fake.calls(); inspects != inspectsBefore {
+				t.Fatalf("inspects = %d, want %d: the run must not reach the runtime", inspects, inspectsBefore)
+			}
+			if n := len(e.events(t, "prod")); n != eventsBefore {
+				t.Fatalf("events = %d, want %d: a run that gave up writes no event", n, eventsBefore)
+			}
+			if n := e.revisionCount(t, "prod"); n != 0 {
+				t.Fatalf("revisions = %d, want 0", n)
+			}
+			if got := e.target(t, "prod").Status; got != store.StatusProgressing {
+				t.Fatalf("status = %s, want Progressing: the holder's status must not change", got)
+			}
+		})
+	}
+}
+
+func TestSyncWaitsForLockWithinLockWait(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cross bool
+	}{{"same process", false}, {"other process", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			e := newEnv(t)
+			gate := make(chan struct{})
+			e.fake.gates["prod"] = gate
+			e.fake.entered = make(chan string, 2)
+			first := syncAsync(e.svc, ctx, prod)
+			<-e.fake.entered
+
+			svc := e.contender(tc.cross)
+			svc.lockWait = 10 * time.Second
+			waiting := onWait(svc, tc.cross)
+			second := syncAsync(svc, ctx, prod)
+			<-waiting
+			close(gate)
+
+			for _, res := range []syncResult{<-first, <-second} {
+				if res.err != nil {
+					t.Fatalf("Sync: %v", res.err)
+				}
+			}
+			if n := e.revisionCount(t, "prod"); n != 2 {
+				t.Fatalf("revisions = %d, want 2", n)
+			}
+		})
+	}
+}
+
 func TestSyncDifferentTargetsRunInParallel(t *testing.T) {
 	ctx := context.Background()
 	e := newEnv(t)
@@ -626,6 +798,129 @@ func TestStatusDoesNotMutate(t *testing.T) {
 		t.Fatalf("events = %d, want %d: Status writes no events", n, eventCount)
 	}
 	e.assertState(t, "prod", store.StatusSynced, 1)
+}
+
+func TestSyncPanicAfterRevisionReportsRevision(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	if _, err := e.svc.Sync(ctx, prod); err != nil {
+		t.Fatalf("first Sync: %v", err)
+	}
+
+	e.setImage(t, imageV2)
+	e.svc.store = failingStore{reconcileStore: e.st, panicStatuses: []store.Status{store.StatusSynced}}
+	number, err := e.svc.Sync(ctx, prod)
+	if err == nil || !strings.Contains(err.Error(), "panic: injected") {
+		t.Fatalf("Sync err = %v, want the panic as an error", err)
+	}
+	if number != 2 {
+		t.Fatalf("returned revision = %d, want 2: the revision was recorded before the panic", number)
+	}
+	var run *RunError
+	if !errors.As(err, &run) || run.Revision != 2 {
+		t.Fatalf("err = %v, want a RunError carrying revision 2", err)
+	}
+	if n := e.revisionCount(t, "prod"); n != 2 {
+		t.Fatalf("revisions = %d, want 2", n)
+	}
+	e.assertState(t, "prod", store.StatusDegraded, 2)
+}
+
+func TestPanicBeforeWriteKeepsLastRevision(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	if _, err := e.svc.Sync(ctx, prod); err != nil {
+		t.Fatalf("first Sync: %v", err)
+	}
+
+	op := operation{
+		kind:      kindSync,
+		started:   EventSyncStarted,
+		succeeded: EventSyncSucceeded,
+		failed:    EventSyncFailed,
+		message:   "sync started",
+	}
+	src := func(context.Context) (*desired.Desired, string, error) { panic("injected") }
+	_, err := e.svc.execute(ctx, prod, op, src)
+	if err == nil || !strings.Contains(err.Error(), "panic: injected") {
+		t.Fatalf("execute err = %v, want the panic as an error", err)
+	}
+	e.assertState(t, "prod", store.StatusDegraded, 1)
+}
+
+func TestSyncMissingRootIsNotInvalidManifest(t *testing.T) {
+	e := newEnv(t)
+	e.svc.root = filepath.Join(e.dir, "missing")
+
+	_, err := e.svc.Sync(context.Background(), prod)
+	if err == nil || errors.Is(err, ErrInvalidManifest) {
+		t.Fatalf("Sync err = %v, want an error that is not an invalid manifest", err)
+	}
+	var run *RunError
+	if !errors.As(err, &run) || run.Stage != StageRender {
+		t.Fatalf("Sync err = %v, want a RunError at the render stage", err)
+	}
+}
+
+func TestSyncUndeclaredTargetTakesNoLock(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	typo := Ref{Application: "web", Target: "prdo"}
+
+	if _, err := e.svc.Sync(ctx, typo); !errors.Is(err, ErrUnknownTarget) {
+		t.Fatalf("Sync err = %v, want ErrUnknownTarget", err)
+	}
+	if _, ok := e.svc.locks.slots[typo]; ok {
+		t.Fatal("a lock slot was created for an undeclared target")
+	}
+	entries, err := os.ReadDir(filepath.Join(e.dir, "locks"))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("lock files = %d, want 0 for an undeclared target", len(entries))
+	}
+}
+
+func TestStatusErrorsAreRunErrors(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+
+	e.svc.runtimes = func(context.Context, string) (runtime.Runtime, error) {
+		return nil, errors.New("connection refused")
+	}
+	if _, err := e.svc.Status(ctx, prod); !isRunStage(err, stageRuntime) {
+		t.Fatalf("Status err = %v, want a RunError at runtime", err)
+	}
+
+	e.svc.runtimes = func(context.Context, string) (runtime.Runtime, error) {
+		return e.fake, nil
+	}
+	e.fake.inspectErr = errors.New("docker: timeout")
+	if _, err := e.svc.Status(ctx, prod); !isRunStage(err, stageInspect) {
+		t.Fatalf("Status err = %v, want a RunError at inspect", err)
+	}
+}
+
+func isRunStage(err error, stage Stage) bool {
+	var run *RunError
+	return errors.As(err, &run) && run.Stage == stage
+}
+
+func TestRejectsBackslashInName(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	ref := Ref{Application: "web", Target: `prod\x`}
+
+	if _, err := e.svc.Sync(ctx, ref); !errors.Is(err, ErrInvalidRef) {
+		t.Errorf("Sync err = %v, want ErrInvalidRef", err)
+	}
+	if _, err := e.svc.Rollback(ctx, ref, 1); !errors.Is(err, ErrInvalidRef) {
+		t.Errorf("Rollback err = %v, want ErrInvalidRef", err)
+	}
+	if _, err := e.svc.Status(ctx, ref); !errors.Is(err, ErrInvalidRef) {
+		t.Errorf("Status err = %v, want ErrInvalidRef", err)
+	}
 }
 
 type syncResult struct {

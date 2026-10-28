@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -56,26 +57,27 @@ type SyncPolicy struct {
 }
 
 func loadApplication(path string) (*Application, error) {
-	f, err := os.Open(path)
+	// The file is read before it is parsed, so a read error is not mistaken for
+	// a parse error.
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close() //nolint:errcheck // read-only file
 
-	dec := yaml.NewDecoder(f)
+	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 
 	var app Application
 	if err := dec.Decode(&app); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, fmt.Errorf("%s: %w: %w", path, ErrInvalidManifest, err)
 	}
 
 	var extra any
 	if err := dec.Decode(&extra); err != io.EOF {
 		if err == nil {
-			return nil, fmt.Errorf("%s: multiple YAML documents are not supported", path)
+			return nil, fmt.Errorf("%s: %w: multiple YAML documents are not supported", path, ErrInvalidManifest)
 		}
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, fmt.Errorf("%s: %w: %w", path, ErrInvalidManifest, err)
 	}
 	return &app, nil
 }
@@ -127,12 +129,12 @@ func (a *Application) selectTarget(name string) (Target, error) {
 				return t, nil
 			}
 		}
-		return Target{}, fmt.Errorf("target %q not found (available: %s)", name, a.targetNames())
+		return Target{}, fmt.Errorf("%w: target %q not found (available: %s)", ErrNotDeclared, name, a.targetNames())
 	}
 	if len(a.Spec.Targets) == 1 {
 		return a.Spec.Targets[0], nil
 	}
-	return Target{}, fmt.Errorf("target is required (available: %s)", a.targetNames())
+	return Target{}, fmt.Errorf("%w: target is required (available: %s)", ErrInvalidManifest, a.targetNames())
 }
 
 func (a *Application) targetNames() string {

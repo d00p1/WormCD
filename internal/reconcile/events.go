@@ -14,14 +14,15 @@ const (
 )
 
 // Stage names the step of a run that failed or started. It appears in the
-// failure event payload and in the error text.
+// failure event payload and in the error text. StageRender is the step that
+// loads the manifests: its failure means the manifests are invalid.
 type Stage string
 
 const (
 	stageProgress Stage = "progress"
 	stageStart    Stage = "start"
 	stageTarget   Stage = "target"
-	stageRender   Stage = "render"
+	StageRender   Stage = "render"
 	stageRun      Stage = "run"
 	stageRuntime  Stage = "runtime"
 	stageInspect  Stage = "inspect"
