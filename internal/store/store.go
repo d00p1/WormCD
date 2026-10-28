@@ -15,12 +15,24 @@ import (
 // ErrNotFound is returned when a target or revision does not exist.
 var ErrNotFound = errors.New("store: not found")
 
-// Status is the observed state of a target. Other statuses are added with
-// sync (#20).
+// Status is the observed state of a target.
 type Status string
 
-// StatusUnknown is the starting status of every target, before it is observed.
-const StatusUnknown Status = "Unknown"
+const (
+	// StatusUnknown is the starting status of every target, before it is observed.
+	StatusUnknown Status = "Unknown"
+	// StatusSynced means the last sync succeeded and the cluster matches it.
+	StatusSynced Status = "Synced"
+	// StatusOutOfSync means the cluster differs from the desired state.
+	StatusOutOfSync Status = "OutOfSync"
+	// StatusProgressing means a sync or rollback is running.
+	StatusProgressing Status = "Progressing"
+	// StatusDegraded means the last sync failed in apply, prune or health.
+	StatusDegraded Status = "Degraded"
+	// StatusBlocked means the target cannot be synced: the manifest is invalid,
+	// or the cluster is unavailable.
+	StatusBlocked Status = "Blocked"
+)
 
 // Store is a SQLite-backed store. It is safe for concurrent use.
 type Store struct {
@@ -85,6 +97,32 @@ func (s *Store) EnsureTarget(ctx context.Context, application, target, cluster s
 		return Target{}, fmt.Errorf("store: ensure target %s/%s: %w", application, target, err)
 	}
 	return s.Target(ctx, application, target)
+}
+
+// SetTargetState records the status, message and last successful revision of
+// an existing target. It returns ErrNotFound if the target does not exist and
+// an error for an unknown status.
+func (s *Store) SetTargetState(ctx context.Context, application, target string, status Status, message string, lastRevision int64) error {
+	switch status {
+	case StatusUnknown, StatusSynced, StatusOutOfSync, StatusProgressing, StatusDegraded, StatusBlocked:
+	default:
+		return fmt.Errorf("store: unknown target status %q", status)
+	}
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE targets SET status = ?, message = ?, last_revision = ?
+		WHERE app = ? AND target = ?`,
+		status, message, lastRevision, application, target)
+	if err != nil {
+		return fmt.Errorf("store: set state of %s/%s: %w", application, target, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: set state of %s/%s: %w", application, target, err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // Target returns the target for application and target, or ErrNotFound.
