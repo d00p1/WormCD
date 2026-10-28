@@ -29,7 +29,7 @@ func TestParseRef(t *testing.T) {
 	if ref != (reconcile.Ref{Application: "web", Target: "staging"}) {
 		t.Fatalf("ref = %+v", ref)
 	}
-	for _, bad := range []string{"web", "/prod", "web/", "web/prod/x", ""} {
+	for _, bad := range []string{"web", "/prod", "web/", "web/prod/x", "", `web/pr\od`, `we\b/prod`} {
 		if _, err := parseRef("sync", bad); err == nil {
 			t.Errorf("parseRef(%q) returned no error", bad)
 		}

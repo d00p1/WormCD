@@ -292,12 +292,17 @@ func parseInterleaved(fs *flag.FlagSet, args []string) ([]string, error) {
 	}
 }
 
+// parseRef reads an app/target argument. It applies the rules of the API too.
 func parseRef(name, s string) (reconcile.Ref, error) {
 	app, target, ok := strings.Cut(s, "/")
-	if !ok || app == "" || target == "" || strings.Contains(target, "/") {
+	if !ok {
 		return reconcile.Ref{}, fmt.Errorf("%s: target %q must be in app/target form", name, s)
 	}
-	return reconcile.Ref{Application: app, Target: target}, nil
+	ref := reconcile.Ref{Application: app, Target: target}
+	if err := reconcile.ValidateRef(ref); err != nil {
+		return reconcile.Ref{}, fmt.Errorf("%s: %w", name, err)
+	}
+	return ref, nil
 }
 
 // withRecorded tells the operator about a revision that a failed run recorded
