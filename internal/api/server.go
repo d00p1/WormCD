@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"mime"
@@ -153,6 +154,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 	ref := refOf(r)
+	// The body is optional, but when it is sent it must be an empty JSON object.
+	var req struct{}
+	if err := decodeBody(w, r, &req); err != nil && !errors.Is(err, io.EOF) {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	// A run must finish even if the client goes away, or it would stop halfway through an apply.
 	number, err := s.ops.Sync(context.WithoutCancel(r.Context()), ref)
 	if err != nil {
@@ -168,14 +175,9 @@ type rollbackRequest struct {
 
 func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 	ref := refOf(r)
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10))
 	var req rollbackRequest
-	if err := dec.Decode(&req); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "decode body: "+err.Error())
-		return
-	}
-	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		writeJSONError(w, http.StatusBadRequest, "body must hold one JSON object")
+	if err := decodeBody(w, r, &req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if req.Revision < 1 {
@@ -208,6 +210,21 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, NewHistoryView(ref.Application, ref.Target, revs))
 }
 
+// decodeBody reads one JSON object from the body of r into v. Unknown fields,
+// more than one value and a body that is not JSON are errors. An empty body
+// returns an error that wraps io.EOF.
+func decodeBody(w http.ResponseWriter, r *http.Request, v any) error {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return fmt.Errorf("decode body: %w", err)
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("body must hold one JSON object")
+	}
+	return nil
+}
+
 func refOf(r *http.Request) reconcile.Ref {
 	return reconcile.Ref{Application: r.PathValue("app"), Target: r.PathValue("target")}
 }
@@ -222,9 +239,10 @@ type errorBody struct {
 
 // writeError maps a failure to a status code and reason:
 //   - an unknown target or revision: 404 not_found
-//   - a manifest that does not render: 422 invalid_manifest
+//   - a name that is not a target name: 400 invalid_ref
+//   - a manifest that does not parse, validate or render: 422 invalid_manifest
 //   - a corrupted stored revision: 422 corrupt_revision
-//   - a run that failed on the cluster or the store: 500 sync_failed
+//   - a run that failed on the cluster, the store or the checkout: 500 sync_failed
 //   - anything else: 500 internal
 func writeError(w http.ResponseWriter, err error) {
 	var run *reconcile.RunError
@@ -237,9 +255,11 @@ func writeError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, reconcile.ErrUnknownTarget):
 		status, body.Reason = http.StatusNotFound, "not_found"
+	case errors.Is(err, reconcile.ErrInvalidRef):
+		status, body.Reason = http.StatusBadRequest, "invalid_ref"
 	case errors.Is(err, reconcile.ErrCorruptRevision):
 		status, body.Reason = http.StatusUnprocessableEntity, "corrupt_revision"
-	case isRun && run.Stage == reconcile.StageRender:
+	case errors.Is(err, reconcile.ErrInvalidManifest):
 		status, body.Reason = http.StatusUnprocessableEntity, "invalid_manifest"
 	case isRun:
 		body.Reason = "sync_failed"
@@ -265,12 +285,9 @@ func loopbackOnly(next http.Handler) http.Handler {
 			writeJSONError(w, http.StatusForbidden, "host is not a loopback address")
 			return
 		}
-		if origin := r.Header.Get("Origin"); origin != "" {
-			u, err := url.Parse(origin)
-			if err != nil || !isLoopbackHost(u.Host) {
-				writeJSONError(w, http.StatusForbidden, "origin is not a loopback address")
-				return
-			}
+		if origin := r.Header.Get("Origin"); origin != "" && !isLoopbackOrigin(origin) {
+			writeJSONError(w, http.StatusForbidden, "origin is not a loopback address")
+			return
 		}
 		if r.Method == http.MethodPost && !isJSON(r.Header.Get("Content-Type")) {
 			writeJSONError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
@@ -289,6 +306,20 @@ func isLoopbackHost(hostport string) bool {
 	}
 	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
 	return strings.EqualFold(host, "localhost") || host == "127.0.0.1" || host == "::1"
+}
+
+// isLoopbackOrigin reports whether origin is an http or https URL of a loopback
+// host, with no user info and no path. Without the user-info check,
+// "http://evil.example@127.0.0.1" would pass as 127.0.0.1.
+func isLoopbackOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.User != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return false
+	}
+	if u.Path != "" && u.Path != "/" {
+		return false
+	}
+	return isLoopbackHost(u.Host)
 }
 
 func isJSON(contentType string) bool {
