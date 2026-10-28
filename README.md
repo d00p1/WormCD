@@ -99,6 +99,12 @@ on a file in `locks/`, next to the database. A CLI run waits for a server run on
 the same target, and the other way round, as long as both use the same database
 directory on one host. `server` requires `--data`.
 
+A run waits at most `--lock-timeout` for another run on the same target. The
+default is `30s`, and the value must be positive. When the target stays locked
+for that long, the run fails without writing anything: `sync` and `rollback`
+exit with `1` and the API answers `409` with reason `sync_in_progress`. The
+timeout covers only the wait; the run's own deadline starts once it holds the lock.
+
 Known limits in M1:
 
 - `history` lists only successful revisions, and their commit field is empty until M2. Failed attempts are only in the `events` table, which neither the CLI nor the API shows.

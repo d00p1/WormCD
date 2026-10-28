@@ -299,6 +299,7 @@ wormcd rollback web/prod --revision 42
 | 415 | — | POST без `Content-Type: application/json` |
 | 422 | `invalid_manifest` | манифесты не разбираются, не валидируются или не рендерятся |
 | 422 | `corrupt_revision` | сохранённая ревизия не читается так, как была отрендерена |
+| 409 | `sync_in_progress` | target занят другим run дольше `LockWait` (`--lock-timeout`, по умолчанию 30 с); run не начинался, ничего не записано, сообщение «target is locked by another run» |
 | 500 | `sync_failed` | run упал на кластере, в store или при чтении checkout; `revision` в теле, если ревизия уже записана |
 | 500 | `internal` | прочие ошибки |
 
