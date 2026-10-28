@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -22,7 +23,6 @@ import (
 	"github.com/d00p1/wormcd/internal/reconcile"
 	"github.com/d00p1/wormcd/internal/runtime"
 	"github.com/d00p1/wormcd/internal/runtime/swarm"
-	"github.com/d00p1/wormcd/internal/store"
 	"github.com/d00p1/wormcd/internal/version"
 )
 
@@ -53,6 +53,14 @@ func run(args []string) error {
 		return runRender(args[1:])
 	case "diff":
 		return runDiff(args[1:])
+	case "sync":
+		return runSync(args[1:], os.Stdout)
+	case "status":
+		return runStatus(args[1:], os.Stdout)
+	case "history":
+		return runHistory(args[1:], os.Stdout)
+	case "rollback":
+		return runRollback(args[1:], os.Stdout)
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -72,34 +80,36 @@ Commands:
   server    run the control plane
   render    render compose + overlay into the normalized desired state
   diff      show the plan against a cluster (read-only)
+  sync      apply the desired state of app/target and record a revision
+  status    show the stored target and whether the cluster matches it
+  history   list the revisions of app/target
+  rollback  apply a stored revision of app/target as a new revision
   version   print version information
 `)
 }
 
 func runServer(args []string) error {
 	fs := flag.NewFlagSet("server", flag.ContinueOnError)
-	listen := fs.String("listen", ":8080", "HTTP listen address")
-	data := fs.String("data", "", "path to the SQLite database; no store is opened when empty")
+	listen := fs.String("listen", "127.0.0.1:8080", "HTTP listen address; must be a loopback address in M1")
+	data := fs.String("data", "", "path to the SQLite database (required)")
+	root := fs.String("root", ".", "deploy repository root used by sync and rollback")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-
-	if *data != "" {
-		st, err := store.Open(context.Background(), *data)
-		if err != nil {
-			return err
-		}
-		defer func() {
-			if err := st.Close(); err != nil {
-				slog.Error("close store", "path", *data, "err", err)
-			}
-		}()
-		slog.Info("store opened", "path", *data)
+	if err := requireLoopback(*listen); err != nil {
+		return err
 	}
+
+	cp, closeCP, err := openControlPlane(context.Background(), *data, *root, localRuntimes)
+	if err != nil {
+		return err
+	}
+	defer closeCP()
+	slog.Info("store opened", "path", *data)
 
 	srv := &http.Server{
 		Addr:              *listen,
-		Handler:           api.New().Handler(),
+		Handler:           api.New(cp.svc, cp.store).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -123,6 +133,23 @@ func runServer(args []string) error {
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)
 	}
+}
+
+// requireLoopback refuses a listen address reachable from other hosts. The API
+// has no authentication in M1; ADR-0007 allows another address only with a
+// bearer token, which is a separate issue.
+func requireLoopback(addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("server: listen address %q: %w", addr, err)
+	}
+	if host == "localhost" {
+		return nil
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	return fmt.Errorf("server: listen address %q is not loopback; the API has no authentication in M1, use 127.0.0.1", addr)
 }
 
 func runRender(args []string) error {
