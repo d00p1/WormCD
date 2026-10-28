@@ -84,7 +84,15 @@ Apply and inspect history (needs a SQLite database with `--data`):
 
 `sync` applies the plan at once; use `diff` to preview it. The same operations
 are served by `wormcd server` under `/api/v1/apps/{app}/targets/{target}`. The
-API listens on loopback only in M1 and has no authentication yet.
+API listens on loopback only in M1 and has no authentication yet. Every POST needs
+a JSON Content-Type:
+
+```sh
+curl -X POST -H 'Content-Type: application/json' \
+  http://127.0.0.1:8080/api/v1/apps/web/targets/staging/sync
+curl -X POST -H 'Content-Type: application/json' -d '{"revision":3}' \
+  http://127.0.0.1:8080/api/v1/apps/web/targets/staging/rollback
+```
 
 `sync`, `rollback` and `server` lock each target across processes with a `flock`
 on a file in `locks/`, next to the database. A CLI run waits for a server run on
