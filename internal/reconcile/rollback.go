@@ -19,7 +19,7 @@ var ErrCorruptRevision = errors.New("revision is corrupted")
 // keeps the rolled-back-from state. It returns the number of the new revision.
 // The run holds the same per-target lock as Sync.
 func (s *Service) Rollback(ctx context.Context, r Ref, number int64) (int64, error) {
-	if err := validateRef(r); err != nil {
+	if err := ValidateRef(r); err != nil {
 		return 0, err
 	}
 	// Revisions are immutable, so the spec is read before the lock. A missing or

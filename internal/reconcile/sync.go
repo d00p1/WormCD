@@ -58,6 +58,14 @@ var errSyncDeadline = errors.New("sync deadline")
 // declare the application or the target. Nothing is recorded for such a target.
 var ErrUnknownTarget = errors.New("unknown target")
 
+// ErrInvalidManifest is the cause of an error in the manifests under the
+// checkout. See manifest.ErrInvalidManifest.
+var ErrInvalidManifest = manifest.ErrInvalidManifest
+
+// ErrInvalidRef is the cause of a name that cannot identify a target: it is
+// empty, or it contains a path separator.
+var ErrInvalidRef = errors.New("invalid target name")
+
 // RunError is a failed sync, rollback or status check. Stage names the step that
 // failed; it is empty when the run failed before a step, or in the write of the
 // success event. Revision is the revision the run recorded before it failed, or
@@ -142,6 +150,13 @@ func (s *Service) Sync(ctx context.Context, r Ref) (int64, error) {
 		failed:    EventSyncFailed,
 		message:   "sync started",
 	}
+	if err := ValidateRef(r); err != nil {
+		return 0, err
+	}
+	// An undeclared target must not get a lock slot or a lock file.
+	if err := s.checkDeclared(r); err != nil {
+		return 0, runErr(op, r, err)
+	}
 	return s.execute(ctx, r, op, func(ctx context.Context) (*desired.Desired, string, error) {
 		return s.render(ctx, r)
 	})
@@ -152,7 +167,7 @@ func (s *Service) Sync(ctx context.Context, r Ref) (int64, error) {
 // writes to the store. It does not wait for a running sync, so during a sync it
 // can report OutOfSync for an intermediate state.
 func (s *Service) Status(ctx context.Context, r Ref) (store.Status, error) {
-	if err := validateRef(r); err != nil {
+	if err := ValidateRef(r); err != nil {
 		return "", err
 	}
 	state, cluster, err := s.render(ctx, r)
@@ -178,7 +193,7 @@ func (s *Service) Status(ctx context.Context, r Ref) (store.Status, error) {
 // deadline starts once the lock is held, so waiting for another run on the same
 // target does not use up this run's time. Waiting itself honors the caller's ctx.
 func (s *Service) execute(ctx context.Context, r Ref, op operation, src source) (number int64, err error) {
-	if err := validateRef(r); err != nil {
+	if err := ValidateRef(r); err != nil {
 		return 0, err
 	}
 	release, err := s.locks.acquire(ctx, r)
@@ -355,14 +370,25 @@ func (op operation) successMessage(number int64) string {
 	return fmt.Sprintf("sync succeeded as revision %d", number)
 }
 
-// validateRef rejects names that are empty or contain a path separator: the
-// names become a lock file name in the data directory.
-func validateRef(r Ref) error {
+// ValidateRef rejects names that are empty or contain "/" or "\". The CLI and
+// the API both check names with it.
+func ValidateRef(r Ref) error {
 	if r.Application == "" || r.Target == "" {
-		return fmt.Errorf("target %q must be in app/target form", r)
+		return fmt.Errorf("%w: target %q must be in app/target form", ErrInvalidRef, r)
 	}
 	if strings.ContainsAny(r.Application+r.Target, `/\`) {
-		return fmt.Errorf("target %q must not contain a path separator", r)
+		return fmt.Errorf("%w: target %q must not contain a path separator", ErrInvalidRef, r)
+	}
+	return nil
+}
+
+// checkDeclared returns an error wrapping ErrUnknownTarget when the manifests
+// do not declare r. Other failures are left to render, which runs under the
+// lock and reports them there.
+func (s *Service) checkDeclared(r Ref) error {
+	err := manifest.Declares(manifest.Options{App: r.String(), Root: s.root})
+	if errors.Is(err, manifest.ErrNotDeclared) {
+		return fmt.Errorf("%w: %w", ErrUnknownTarget, err)
 	}
 	return nil
 }
