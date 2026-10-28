@@ -34,14 +34,20 @@ type reconcileStore interface {
 // convergence waits per service, so N services need more than one wait.
 const DefaultSyncTimeout = 30 * time.Minute
 
+// DefaultLockWait is how long a run waits for another run on the same target
+// when Config does not set one.
+const DefaultLockWait = 30 * time.Second
+
 // Config sets up a Service. Root is the deploy repository checkout. SyncTimeout
 // is the deadline of one sync or rollback; zero means DefaultSyncTimeout.
-// DataDir is the directory of the database; its locks/ subdirectory holds the
-// locks that serialize runs across processes. Empty DataDir keeps the locks in
-// this process only.
+// LockWait is how long a run waits for the lock of its target; zero or a
+// negative value means DefaultLockWait. DataDir is the directory of the
+// database; its locks/ subdirectory holds the locks that serialize runs across
+// processes. Empty DataDir keeps the locks in this process only.
 type Config struct {
 	Root        string
 	SyncTimeout time.Duration
+	LockWait    time.Duration
 	DataDir     string
 }
 
@@ -66,6 +72,10 @@ var ErrInvalidManifest = manifest.ErrInvalidManifest
 // empty, or it contains a path separator.
 var ErrInvalidRef = errors.New("invalid target name")
 
+// ErrLockBusy is the cause of a run that gave up waiting for the lock of its
+// target because another run held it for the whole LockWait.
+var ErrLockBusy = errors.New("target is locked by another run")
+
 // RunError is a failed sync, rollback or status check. Stage names the step that
 // failed; it is empty when the run failed before a step, or in the write of the
 // success event. Revision is the revision the run recorded before it failed, or
@@ -89,6 +99,7 @@ type Service struct {
 	runtimes    RuntimeFactory
 	root        string
 	syncTimeout time.Duration
+	lockWait    time.Duration
 	locks       *locks
 	files       *fileLocks
 }
@@ -99,6 +110,10 @@ func New(st *store.Store, runtimes RuntimeFactory, cfg Config) *Service {
 	if timeout == 0 {
 		timeout = DefaultSyncTimeout
 	}
+	lockWait := cfg.LockWait
+	if lockWait <= 0 {
+		lockWait = DefaultLockWait
+	}
 	var dir string
 	if cfg.DataDir != "" {
 		dir = filepath.Join(cfg.DataDir, "locks")
@@ -108,6 +123,7 @@ func New(st *store.Store, runtimes RuntimeFactory, cfg Config) *Service {
 		runtimes:    runtimes,
 		root:        cfg.Root,
 		syncTimeout: timeout,
+		lockWait:    lockWait,
 		locks:       newLocks(),
 		files:       &fileLocks{dir: dir},
 	}
@@ -191,19 +207,15 @@ func (s *Service) Status(ctx context.Context, r Ref) (store.Status, error) {
 // execute is the run shared by Sync and Rollback: validate, take the target
 // lock, read the desired state, mark the target Progressing and converge. The
 // deadline starts once the lock is held, so waiting for another run on the same
-// target does not use up this run's time. Waiting itself honors the caller's ctx.
+// target does not use up this run's time. The wait honors the caller's ctx and
+// gives up after lockWait with ErrLockBusy.
 func (s *Service) execute(ctx context.Context, r Ref, op operation, src source) (number int64, err error) {
 	if err := ValidateRef(r); err != nil {
 		return 0, err
 	}
-	release, err := s.locks.acquire(ctx, r)
+	unlock, err := s.lock(ctx, r, op)
 	if err != nil {
-		return 0, runErr(op, r, err)
-	}
-	defer release()
-	unlock, err := s.files.acquire(ctx, r)
-	if err != nil {
-		return 0, runErr(op, r, err)
+		return 0, err
 	}
 	defer unlock()
 	ctx, cancel := context.WithTimeoutCause(ctx, s.syncTimeout, errSyncDeadline)
@@ -258,6 +270,37 @@ func (s *Service) execute(ctx context.Context, r Ref, op operation, src source) 
 		return 0, s.fail(ctx, r, op, store.StatusBlocked, stageRuntime, last, 0, err)
 	}
 	return s.converge(ctx, r, op, state, rt, last, &recorded)
+}
+
+// lock takes the in-process lock and the file lock of r, in that order, and
+// returns the function that releases both. The wait for either lock ends after
+// lockWait, a separate deadline from the run's SyncTimeout: it stops when the
+// locks are taken, so the run's own deadline still starts from zero.
+func (s *Service) lock(ctx context.Context, r Ref, op operation) (func(), error) {
+	wait, cancel := context.WithTimeout(ctx, s.lockWait)
+	defer cancel()
+	release, err := s.locks.acquire(wait, r)
+	if err != nil {
+		return nil, s.lockErr(ctx, r, op, err)
+	}
+	unlock, err := s.files.acquire(wait, r)
+	if err != nil {
+		release()
+		return nil, s.lockErr(ctx, r, op, err)
+	}
+	return func() {
+		unlock()
+		release()
+	}, nil
+}
+
+// lockErr reports a failed wait for the lock. The wait's own deadline is
+// ErrLockBusy; a canceled caller and any other failure are reported as they are.
+func (s *Service) lockErr(ctx context.Context, r Ref, op operation, err error) error {
+	if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+		return runErr(op, r, fmt.Errorf("%w (waited %s)", ErrLockBusy, s.lockWait))
+	}
+	return runErr(op, r, err)
 }
 
 // converge brings the cluster to state, prunes, checks health and records

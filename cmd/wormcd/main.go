@@ -93,14 +93,18 @@ func runServer(args []string) error {
 	listen := fs.String("listen", "127.0.0.1:8080", "HTTP listen address; must be a loopback address in M1")
 	data := fs.String("data", "", "path to the SQLite database (required)")
 	root := fs.String("root", ".", "deploy repository root used by sync and rollback")
+	lockWait := bindLockFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if err := requireLoopback(*listen); err != nil {
 		return err
 	}
+	if err := checkLockWait("server", *lockWait); err != nil {
+		return err
+	}
 
-	cp, closeCP, err := openControlPlane(context.Background(), *data, *root, localRuntimes)
+	cp, closeCP, err := openControlPlane(context.Background(), *data, *root, *lockWait, localRuntimes)
 	if err != nil {
 		return err
 	}

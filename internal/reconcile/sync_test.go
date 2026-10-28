@@ -650,6 +650,104 @@ func TestSyncWaitsForTargetLock(t *testing.T) {
 	}
 }
 
+// contender returns the service of a second run of prod: the service of e in
+// the same process, or one that stands for another process on the same data.
+func (e *env) contender(cross bool) *Service {
+	if cross {
+		return e.otherProcess()
+	}
+	return e.svc
+}
+
+// onWait returns a channel that gets a value when a run of svc starts waiting
+// for the lock of the target, in this process or in another one.
+func onWait(svc *Service, cross bool) chan struct{} {
+	waiting := make(chan struct{}, 1)
+	hook := func() { waiting <- struct{}{} }
+	if cross {
+		svc.files.onWait = hook
+	} else {
+		svc.locks.onWait = hook
+	}
+	return waiting
+}
+
+func TestSyncGivesUpWhenTargetStaysLocked(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cross bool
+	}{{"same process", false}, {"other process", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			e := newEnv(t)
+			gate := make(chan struct{})
+			e.fake.gates["prod"] = gate
+			e.fake.entered = make(chan string, 1)
+			first := syncAsync(e.svc, ctx, prod)
+			t.Cleanup(func() {
+				close(gate)
+				<-first
+			})
+			<-e.fake.entered
+
+			svc := e.contender(tc.cross)
+			svc.lockWait = 50 * time.Millisecond
+			eventsBefore := len(e.events(t, "prod"))
+			inspectsBefore, _, _, _ := e.fake.calls()
+
+			_, err := svc.Sync(ctx, prod)
+			if !errors.Is(err, ErrLockBusy) {
+				t.Fatalf("Sync err = %v, want ErrLockBusy", err)
+			}
+			if inspects, _, _, _ := e.fake.calls(); inspects != inspectsBefore {
+				t.Fatalf("inspects = %d, want %d: the run must not reach the runtime", inspects, inspectsBefore)
+			}
+			if n := len(e.events(t, "prod")); n != eventsBefore {
+				t.Fatalf("events = %d, want %d: a run that gave up writes no event", n, eventsBefore)
+			}
+			if n := e.revisionCount(t, "prod"); n != 0 {
+				t.Fatalf("revisions = %d, want 0", n)
+			}
+			if got := e.target(t, "prod").Status; got != store.StatusProgressing {
+				t.Fatalf("status = %s, want Progressing: the holder's status must not change", got)
+			}
+		})
+	}
+}
+
+func TestSyncWaitsForLockWithinLockWait(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cross bool
+	}{{"same process", false}, {"other process", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			e := newEnv(t)
+			gate := make(chan struct{})
+			e.fake.gates["prod"] = gate
+			e.fake.entered = make(chan string, 2)
+			first := syncAsync(e.svc, ctx, prod)
+			<-e.fake.entered
+
+			svc := e.contender(tc.cross)
+			svc.lockWait = 10 * time.Second
+			waiting := onWait(svc, tc.cross)
+			second := syncAsync(svc, ctx, prod)
+			<-waiting
+			close(gate)
+
+			for _, res := range []syncResult{<-first, <-second} {
+				if res.err != nil {
+					t.Fatalf("Sync: %v", res.err)
+				}
+			}
+			if n := e.revisionCount(t, "prod"); n != 2 {
+				t.Fatalf("revisions = %d, want 2", n)
+			}
+		})
+	}
+}
+
 func TestSyncDifferentTargetsRunInParallel(t *testing.T) {
 	ctx := context.Background()
 	e := newEnv(t)

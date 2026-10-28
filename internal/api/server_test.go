@@ -210,6 +210,26 @@ func TestSyncUnknownTargetIsNotFound(t *testing.T) {
 	}
 }
 
+func TestLockBusyIsConflict(t *testing.T) {
+	busy := &reconcile.RunError{Err: fmt.Errorf("sync web/prod: %w (waited 30s)", reconcile.ErrLockBusy)}
+	for _, tc := range []struct {
+		method, path, body string
+		ops                *fakeOps
+	}{
+		{http.MethodPost, "/api/v1/apps/web/targets/prod/sync", "", &fakeOps{syncErr: busy}},
+		{http.MethodPost, "/api/v1/apps/web/targets/prod/rollback", `{"revision":1}`, &fakeOps{rollbackErr: busy}},
+	} {
+		rec := serve(t, New(tc.ops, &fakeRecords{}).Handler(), tc.method, tc.path, tc.body)
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("%s: status = %d, want 409 (body %s)", tc.path, rec.Code, rec.Body)
+		}
+		got := decodeError(t, rec.Body.Bytes())
+		if got.Reason != "sync_in_progress" || !strings.Contains(got.Error, "target is locked by another run") {
+			t.Fatalf("%s: body = %+v, want reason sync_in_progress and the lock message", tc.path, got)
+		}
+	}
+}
+
 func TestSyncInvalidManifestIsUnprocessable(t *testing.T) {
 	ops := &fakeOps{syncErr: &reconcile.RunError{Stage: reconcile.StageRender, Err: fmt.Errorf("%w: compose: bad field", reconcile.ErrInvalidManifest)}}
 	rec := serve(t, New(ops, &fakeRecords{}).Handler(), http.MethodPost, "/api/v1/apps/web/targets/prod/sync", "")

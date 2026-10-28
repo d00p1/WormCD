@@ -72,8 +72,9 @@ type controlPlane struct {
 }
 
 // openControlPlane opens the store at data and builds the reconcile service on
-// top of it. The returned function releases the runtime clients and the store.
-func openControlPlane(ctx context.Context, data, root string, runtimes runtimeProvider) (*controlPlane, func(), error) {
+// top of it. lockWait is the longest a run waits for the lock of its target.
+// The returned function releases the runtime clients and the store.
+func openControlPlane(ctx context.Context, data, root string, lockWait time.Duration, runtimes runtimeProvider) (*controlPlane, func(), error) {
 	if data == "" {
 		return nil, nil, errors.New("--data is required")
 	}
@@ -84,7 +85,11 @@ func openControlPlane(ctx context.Context, data, root string, runtimes runtimePr
 		return nil, nil, err
 	}
 	cp := &controlPlane{
-		svc:   reconcile.New(st, factory, reconcile.Config{Root: root, DataDir: filepath.Dir(data)}),
+		svc: reconcile.New(st, factory, reconcile.Config{
+			Root:     root,
+			LockWait: lockWait,
+			DataDir:  filepath.Dir(data),
+		}),
 		store: st,
 	}
 	closeAll := func() {
@@ -103,14 +108,18 @@ func runSync(args []string, stdout io.Writer) error {
 func runSyncWith(args []string, stdout io.Writer, runtimes runtimeProvider) error {
 	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
 	data, root, output := bindOperationFlags(fs)
+	lockWait := bindLockFlag(fs)
 	ref, err := parseOperationTarget(fs, "sync", args, output)
 	if err != nil {
+		return err
+	}
+	if err := checkLockWait("sync", *lockWait); err != nil {
 		return err
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	cp, closeCP, err := openControlPlane(ctx, *data, *root, runtimes)
+	cp, closeCP, err := openControlPlane(ctx, *data, *root, *lockWait, runtimes)
 	if err != nil {
 		return err
 	}
@@ -140,7 +149,7 @@ func runStatusWith(args []string, stdout io.Writer, runtimes runtimeProvider) er
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	cp, closeCP, err := openControlPlane(ctx, *data, *root, runtimes)
+	cp, closeCP, err := openControlPlane(ctx, *data, *root, reconcile.DefaultLockWait, runtimes)
 	if err != nil {
 		return err
 	}
@@ -180,7 +189,7 @@ func runHistoryWith(args []string, stdout io.Writer, runtimes runtimeProvider) e
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	cp, closeCP, err := openControlPlane(ctx, *data, *root, runtimes)
+	cp, closeCP, err := openControlPlane(ctx, *data, *root, reconcile.DefaultLockWait, runtimes)
 	if err != nil {
 		return err
 	}
@@ -221,6 +230,7 @@ func runRollbackWith(args []string, stdout io.Writer, runtimes runtimeProvider) 
 	fs := flag.NewFlagSet("rollback", flag.ContinueOnError)
 	data, root, output := bindOperationFlags(fs)
 	revision := fs.Int64("revision", 0, "revision number to roll back to")
+	lockWait := bindLockFlag(fs)
 	ref, err := parseOperationTarget(fs, "rollback", args, output)
 	if err != nil {
 		return err
@@ -228,10 +238,13 @@ func runRollbackWith(args []string, stdout io.Writer, runtimes runtimeProvider) 
 	if *revision < 1 {
 		return errors.New("rollback: --revision must be a positive revision number")
 	}
+	if err := checkLockWait("rollback", *lockWait); err != nil {
+		return err
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	cp, closeCP, err := openControlPlane(ctx, *data, *root, runtimes)
+	cp, closeCP, err := openControlPlane(ctx, *data, *root, *lockWait, runtimes)
 	if err != nil {
 		return err
 	}
@@ -253,6 +266,21 @@ func bindOperationFlags(fs *flag.FlagSet) (data, root, output *string) {
 	root = fs.String("root", ".", "deploy repository root")
 	output = fs.String("output", "human", "output format: human or json")
 	return data, root, output
+}
+
+// bindLockFlag registers --lock-timeout, the longest a run waits for another
+// run on the same target. Only the commands that take a target lock have it.
+func bindLockFlag(fs *flag.FlagSet) *time.Duration {
+	return fs.Duration("lock-timeout", reconcile.DefaultLockWait, "longest wait for another run on the same target; must be positive")
+}
+
+// checkLockWait rejects a lock timeout that cannot wait for anything. A zero
+// timeout would make every busy target fail at once, so it is an error too.
+func checkLockWait(name string, d time.Duration) error {
+	if d <= 0 {
+		return fmt.Errorf("%s: --lock-timeout must be positive, got %s", name, d)
+	}
+	return nil
 }
 
 // parseOperationTarget reads the app/target argument and the flags of an

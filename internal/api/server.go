@@ -169,7 +169,7 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A run must finish even if the client goes away, or it would stop halfway through an apply.
-	// Waiting for another run on the same target has no deadline: a known limitation of M1.
+	// The wait for another run on the same target is bounded by the service's lock timeout.
 	number, err := s.ops.Sync(context.WithoutCancel(r.Context()), ref)
 	if err != nil {
 		writeError(w, err)
@@ -255,6 +255,7 @@ type errorBody struct {
 //   - a name that is not a target name: 400 invalid_ref
 //   - a manifest that does not parse, validate or render: 422 invalid_manifest
 //   - a corrupted stored revision: 422 corrupt_revision
+//   - the target stayed locked by another run for the whole lock timeout: 409 sync_in_progress
 //   - a run that failed on the cluster, the store or the checkout: 500 sync_failed
 //   - anything else: 500 internal
 func writeError(w http.ResponseWriter, err error) {
@@ -274,6 +275,8 @@ func writeError(w http.ResponseWriter, err error) {
 		status, body.Reason = http.StatusUnprocessableEntity, "corrupt_revision"
 	case errors.Is(err, reconcile.ErrInvalidManifest):
 		status, body.Reason = http.StatusUnprocessableEntity, "invalid_manifest"
+	case errors.Is(err, reconcile.ErrLockBusy):
+		status, body.Reason = http.StatusConflict, "sync_in_progress"
 	case isRun:
 		body.Reason = "sync_failed"
 	default:

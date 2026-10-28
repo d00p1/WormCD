@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/d00p1/wormcd/internal/api"
 	"github.com/d00p1/wormcd/internal/desired"
@@ -272,7 +274,7 @@ func TestOperationsEndToEnd(t *testing.T) {
 // checks the target and history it returns.
 func assertAPIMatchesCLI(t *testing.T, data, root string, rt *memRuntime) {
 	t.Helper()
-	cp, closeCP, err := openControlPlane(context.Background(), data, root, testRuntimes(rt))
+	cp, closeCP, err := openControlPlane(context.Background(), data, root, reconcile.DefaultLockWait, testRuntimes(rt))
 	if err != nil {
 		t.Fatalf("openControlPlane: %v", err)
 	}
@@ -335,13 +337,59 @@ func TestSyncUnknownTargetLeavesNoRow(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "not declared in the manifests") {
 		t.Fatalf("error = %v, want the undeclared target error", err)
 	}
-	cp, closeCP, err := openControlPlane(context.Background(), data, root, testRuntimes(newMemRuntime()))
+	cp, closeCP, err := openControlPlane(context.Background(), data, root, reconcile.DefaultLockWait, testRuntimes(newMemRuntime()))
 	if err != nil {
 		t.Fatalf("openControlPlane: %v", err)
 	}
 	defer closeCP()
 	if _, err := cp.store.Target(context.Background(), "web", "typo"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("Target err = %v, want no row for the typo", err)
+	}
+}
+
+func TestLockTimeoutFlagDefaultsToThirtySeconds(t *testing.T) {
+	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
+	lockWait := bindLockFlag(fs)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatal(err)
+	}
+	if *lockWait != 30*time.Second {
+		t.Fatalf("default lock timeout = %s, want 30s", *lockWait)
+	}
+	fs = flag.NewFlagSet("sync", flag.ContinueOnError)
+	lockWait = bindLockFlag(fs)
+	if err := fs.Parse([]string{"--lock-timeout", "5s"}); err != nil {
+		t.Fatal(err)
+	}
+	if *lockWait != 5*time.Second {
+		t.Fatalf("lock timeout = %s, want 5s", *lockWait)
+	}
+}
+
+func TestLockTimeoutMustBePositive(t *testing.T) {
+	dir := t.TempDir()
+	data := filepath.Join(dir, "wormcd.db")
+	for _, v := range []string{"0", "0s", "-1s"} {
+		runs := map[string]func() error{
+			"server": func() error {
+				return runServer([]string{"--data", data, "--lock-timeout", v})
+			},
+			"sync": func() error {
+				return runSyncWith([]string{"web/prod", "--data", data, "--lock-timeout", v}, &bytes.Buffer{}, testRuntimes(newMemRuntime()))
+			},
+			"rollback": func() error {
+				return runRollbackWith([]string{"web/prod", "--revision", "1", "--data", data, "--lock-timeout", v}, &bytes.Buffer{}, testRuntimes(newMemRuntime()))
+			},
+		}
+		for name, run := range runs {
+			err := run()
+			if err == nil || !strings.Contains(err.Error(), name+": --lock-timeout must be positive") {
+				t.Errorf("%s --lock-timeout %s: error = %v, want a positive-value error", name, v, err)
+			}
+		}
+	}
+	if _, err := os.Stat(data); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("store was created for a rejected lock timeout: %v", err)
 	}
 }
 
