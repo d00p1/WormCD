@@ -99,6 +99,12 @@ on a file in `locks/`, next to the database. A CLI run waits for a server run on
 the same target, and the other way round, as long as both use the same database
 directory on one host. `server` requires `--data`.
 
+Known limits in M1:
+
+- `history` lists only successful revisions, and their commit field is empty until M2. Failed attempts are only in the `events` table, which neither the CLI nor the API shows.
+- A SIGTERM during a run can leave the target `Progressing` until the next manual `sync`.
+- Lock files named `<app>-<target>.lock` from earlier builds in `locks/` are harmless and can be deleted.
+
 Unit tests are hermetic. Docker integration tests are opt-in:
 
 ```sh
