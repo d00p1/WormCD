@@ -5,8 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
+	"mime"
+	"net"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/d00p1/wormcd/internal/reconcile"
@@ -46,8 +51,10 @@ func New(ops Operations, records Records) *Server {
 	return s
 }
 
-// Handler returns the root http.Handler.
-func (s *Server) Handler() http.Handler { return s.mux }
+// Handler returns the root http.Handler. Every request first passes the
+// loopback guard, so a page from another site cannot reach the API through a
+// cross-site form or a DNS-rebound name.
+func (s *Server) Handler() http.Handler { return loopbackOnly(s.mux) }
 
 // TargetView is a target as stored: the last sync result, without contacting
 // the cluster.
@@ -146,7 +153,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 	ref := refOf(r)
-	number, err := s.ops.Sync(r.Context(), ref)
+	// A run must finish even if the client goes away, or it would stop halfway through an apply.
+	number, err := s.ops.Sync(context.WithoutCancel(r.Context()), ref)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -160,16 +168,22 @@ type rollbackRequest struct {
 
 func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 	ref := refOf(r)
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10))
 	var req rollbackRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10)).Decode(&req); err != nil {
+	if err := dec.Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "decode body: "+err.Error())
+		return
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeJSONError(w, http.StatusBadRequest, "body must hold one JSON object")
 		return
 	}
 	if req.Revision < 1 {
 		writeJSONError(w, http.StatusBadRequest, "revision must be a positive number")
 		return
 	}
-	number, err := s.ops.Rollback(r.Context(), ref, req.Revision)
+	// A run must finish even if the client goes away, or it would stop halfway through an apply.
+	number, err := s.ops.Rollback(context.WithoutCancel(r.Context()), ref, req.Revision)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -184,6 +198,13 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	// An empty history is the answer for a known target only: an unknown one is 404, as in the CLI.
+	if len(revs) == 0 {
+		if _, err := s.records.Target(r.Context(), ref.Application, ref.Target); err != nil {
+			writeError(w, err)
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, NewHistoryView(ref.Application, ref.Target, revs))
 }
 
@@ -191,18 +212,88 @@ func refOf(r *http.Request) reconcile.Ref {
 	return reconcile.Ref{Application: r.PathValue("app"), Target: r.PathValue("target")}
 }
 
-// writeError maps a failure to a status code: an unknown target or revision is
-// 404, anything else is 500 with the error text.
+// errorBody is the body of every failed request. Reason is a stable word for
+// the client; Revision is set when a failed run had recorded a revision.
+type errorBody struct {
+	Error    string `json:"error"`
+	Reason   string `json:"reason,omitempty"`
+	Revision int64  `json:"revision,omitempty"`
+}
+
+// writeError maps a failure to a status code and reason:
+//   - an unknown target or revision: 404 not_found
+//   - a manifest that does not render: 422 invalid_manifest
+//   - a corrupted stored revision: 422 corrupt_revision
+//   - a run that failed on the cluster or the store: 500 sync_failed
+//   - anything else: 500 internal
 func writeError(w http.ResponseWriter, err error) {
-	if errors.Is(err, store.ErrNotFound) {
-		writeJSONError(w, http.StatusNotFound, err.Error())
-		return
+	var run *reconcile.RunError
+	isRun := errors.As(err, &run)
+	body := errorBody{Error: err.Error()}
+	if isRun {
+		body.Revision = run.Revision
 	}
-	writeJSONError(w, http.StatusInternalServerError, err.Error())
+	status := http.StatusInternalServerError
+	switch {
+	case errors.Is(err, store.ErrNotFound), errors.Is(err, reconcile.ErrUnknownTarget):
+		status, body.Reason = http.StatusNotFound, "not_found"
+	case errors.Is(err, reconcile.ErrCorruptRevision):
+		status, body.Reason = http.StatusUnprocessableEntity, "corrupt_revision"
+	case isRun && run.Stage == reconcile.StageRender:
+		status, body.Reason = http.StatusUnprocessableEntity, "invalid_manifest"
+	case isRun:
+		body.Reason = "sync_failed"
+	default:
+		body.Reason = "internal"
+	}
+	writeJSON(w, status, body)
 }
 
 func writeJSONError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
+	writeJSON(w, status, errorBody{Error: msg})
+}
+
+// loopbackOnly refuses requests that a local client would not send. The API has
+// no authentication in M1, so it relies on the address it listens on. A browser
+// page can still reach that address: through a DNS name that rebinds to
+// 127.0.0.1 (the Host header then names that site) or through a cross-site
+// form (the Origin header names that site, and a form posts without JSON). The
+// guard rejects a foreign Host or Origin, and requires JSON for POST.
+func loopbackOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isLoopbackHost(r.Host) {
+			writeJSONError(w, http.StatusForbidden, "host is not a loopback address")
+			return
+		}
+		if origin := r.Header.Get("Origin"); origin != "" {
+			u, err := url.Parse(origin)
+			if err != nil || !isLoopbackHost(u.Host) {
+				writeJSONError(w, http.StatusForbidden, "origin is not a loopback address")
+				return
+			}
+		}
+		if r.Method == http.MethodPost && !isJSON(r.Header.Get("Content-Type")) {
+			writeJSONError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// isLoopbackHost reports whether hostport, a Host header or the host of an
+// Origin, names localhost, 127.0.0.1 or [::1], with or without a port.
+func isLoopbackHost(hostport string) bool {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	return strings.EqualFold(host, "localhost") || host == "127.0.0.1" || host == "::1"
+}
+
+func isJSON(contentType string) bool {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	return err == nil && mediaType == "application/json"
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

@@ -16,7 +16,7 @@ import (
 )
 
 func TestHealthz(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req := localRequest(http.MethodGet, "/healthz", "")
 	rec := httptest.NewRecorder()
 
 	New(&fakeOps{}, &fakeRecords{}).Handler().ServeHTTP(rec, req)
@@ -41,15 +41,19 @@ type fakeOps struct {
 
 	synced     []reconcile.Ref
 	rolledBack []int64
+	// ctxErr is the error of the context the last run received.
+	ctxErr error
 }
 
-func (f *fakeOps) Sync(_ context.Context, r reconcile.Ref) (int64, error) {
+func (f *fakeOps) Sync(ctx context.Context, r reconcile.Ref) (int64, error) {
 	f.synced = append(f.synced, r)
+	f.ctxErr = ctx.Err()
 	return f.syncRev, f.syncErr
 }
 
-func (f *fakeOps) Rollback(_ context.Context, _ reconcile.Ref, number int64) (int64, error) {
+func (f *fakeOps) Rollback(ctx context.Context, _ reconcile.Ref, number int64) (int64, error) {
 	f.rolledBack = append(f.rolledBack, number)
+	f.ctxErr = ctx.Err()
 	if f.rollbackErr != nil {
 		return 0, f.rollbackErr
 	}
@@ -78,12 +82,27 @@ func (f *fakeRecords) Revisions(context.Context, string, string) ([]store.Revisi
 	return f.revs, f.revsErr
 }
 
+// localRequest builds a request the way a local client sends it: a loopback
+// Host and a JSON content type.
+func localRequest(method, path, body string) *http.Request {
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Host = "127.0.0.1:8080"
+	req.Header.Set("Content-Type", "application/json")
+	return req
+}
+
 func serve(t *testing.T, h http.Handler, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, localRequest(method, path, body))
 	return rec
+}
+
+func decodeError(t *testing.T, body []byte) errorBody {
+	t.Helper()
+	var got errorBody
+	decode(t, body, &got)
+	return got
 }
 
 func TestGetTarget(t *testing.T) {
@@ -149,14 +168,161 @@ func TestSyncReturnsRevision(t *testing.T) {
 }
 
 func TestSyncErrorIsServerError(t *testing.T) {
-	ops := &fakeOps{syncErr: errors.New("apply failed")}
+	ops := &fakeOps{syncErr: &reconcile.RunError{Stage: "apply", Err: errors.New("apply failed")}}
 	rec := serve(t, New(ops, &fakeRecords{}).Handler(), http.MethodPost, "/api/v1/apps/web/targets/prod/sync", "")
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "apply failed") {
-		t.Fatalf("body = %s, want the error text", rec.Body)
+	got := decodeError(t, rec.Body.Bytes())
+	if got.Reason != "sync_failed" || !strings.Contains(got.Error, "apply failed") || got.Revision != 0 {
+		t.Fatalf("body = %+v, want reason sync_failed with the error text and no revision", got)
+	}
+}
+
+func TestSyncFailureReportsRecordedRevision(t *testing.T) {
+	ops := &fakeOps{syncErr: &reconcile.RunError{Stage: "status", Revision: 4, Err: errors.New("status not updated")}}
+	rec := serve(t, New(ops, &fakeRecords{}).Handler(), http.MethodPost, "/api/v1/apps/web/targets/prod/sync", "")
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	if got := decodeError(t, rec.Body.Bytes()); got.Revision != 4 {
+		t.Fatalf("body = %+v, want revision 4: the revision exists", got)
+	}
+}
+
+func TestSyncUnknownTargetIsNotFound(t *testing.T) {
+	ops := &fakeOps{syncErr: fmt.Errorf("sync web/x: %w", reconcile.ErrUnknownTarget)}
+	rec := serve(t, New(ops, &fakeRecords{}).Handler(), http.MethodPost, "/api/v1/apps/web/targets/x/sync", "")
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (body %s)", rec.Code, rec.Body)
+	}
+	if got := decodeError(t, rec.Body.Bytes()); got.Reason != "not_found" {
+		t.Fatalf("reason = %q, want not_found", got.Reason)
+	}
+}
+
+func TestSyncInvalidManifestIsUnprocessable(t *testing.T) {
+	ops := &fakeOps{syncErr: &reconcile.RunError{Stage: reconcile.StageRender, Err: errors.New("compose: bad field")}}
+	rec := serve(t, New(ops, &fakeRecords{}).Handler(), http.MethodPost, "/api/v1/apps/web/targets/prod/sync", "")
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 (body %s)", rec.Code, rec.Body)
+	}
+	if got := decodeError(t, rec.Body.Bytes()); got.Reason != "invalid_manifest" || !strings.Contains(got.Error, "bad field") {
+		t.Fatalf("body = %+v, want reason invalid_manifest", got)
+	}
+}
+
+func TestStatusInvalidManifestIsUnprocessable(t *testing.T) {
+	ops := &fakeOps{statusErr: &reconcile.RunError{Stage: reconcile.StageRender, Err: errors.New("bad manifest")}}
+	records := &fakeRecords{target: store.Target{Application: "web", Target: "prod"}}
+	rec := serve(t, New(ops, records).Handler(), http.MethodGet, "/api/v1/apps/web/targets/prod/status", "")
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 (body %s)", rec.Code, rec.Body)
+	}
+}
+
+func TestStatusUnknownTargetIsNotFound(t *testing.T) {
+	ops := &fakeOps{statusErr: &reconcile.RunError{Stage: reconcile.StageRender, Err: fmt.Errorf("%w: missing", reconcile.ErrUnknownTarget)}}
+	records := &fakeRecords{target: store.Target{Application: "web", Target: "prod"}}
+	rec := serve(t, New(ops, records).Handler(), http.MethodGet, "/api/v1/apps/web/targets/prod/status", "")
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (body %s)", rec.Code, rec.Body)
+	}
+}
+
+func TestRunSurvivesClientCancel(t *testing.T) {
+	ops := &fakeOps{syncRev: 2}
+	req := localRequest(http.MethodPost, "/api/v1/apps/web/targets/prod/sync", "")
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	rec := httptest.NewRecorder()
+	New(ops, &fakeRecords{}).Handler().ServeHTTP(rec, req.WithContext(canceled))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body)
+	}
+	if ops.ctxErr != nil {
+		t.Fatalf("run context error = %v, want none: a client that disconnects must not stop the run", ops.ctxErr)
+	}
+}
+
+func TestLoopbackGuardHost(t *testing.T) {
+	for _, host := range []string{"127.0.0.1", "127.0.0.1:8080", "localhost", "LocalHost:8080", "[::1]", "[::1]:8080", "::1"} {
+		req := localRequest(http.MethodGet, "/healthz", "")
+		req.Host = host
+		rec := httptest.NewRecorder()
+		New(&fakeOps{}, &fakeRecords{}).Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Errorf("Host %q: status = %d, want 200", host, rec.Code)
+		}
+	}
+	for _, host := range []string{"evil.example", "evil.example:8080", "127.0.0.2", "0.0.0.0:8080", "", "localhost.evil.example"} {
+		ops := &fakeOps{syncRev: 1}
+		req := localRequest(http.MethodPost, "/api/v1/apps/web/targets/prod/sync", "")
+		req.Host = host
+		rec := httptest.NewRecorder()
+		New(ops, &fakeRecords{}).Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("Host %q: status = %d, want 403", host, rec.Code)
+		}
+		if len(ops.synced) != 0 {
+			t.Errorf("Host %q: sync ran", host)
+		}
+	}
+}
+
+func TestLoopbackGuardOrigin(t *testing.T) {
+	for _, origin := range []string{"http://127.0.0.1:8080", "http://localhost", "http://[::1]:8080"} {
+		req := localRequest(http.MethodGet, "/healthz", "")
+		req.Header.Set("Origin", origin)
+		rec := httptest.NewRecorder()
+		New(&fakeOps{}, &fakeRecords{}).Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Errorf("Origin %q: status = %d, want 200", origin, rec.Code)
+		}
+	}
+	for _, origin := range []string{"https://evil.example", "http://evil.example:8080", "null", "http://127.0.0.1.evil.example"} {
+		ops := &fakeOps{syncRev: 1}
+		req := localRequest(http.MethodPost, "/api/v1/apps/web/targets/prod/sync", "")
+		req.Header.Set("Origin", origin)
+		rec := httptest.NewRecorder()
+		New(ops, &fakeRecords{}).Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("Origin %q: status = %d, want 403", origin, rec.Code)
+		}
+		if len(ops.synced) != 0 {
+			t.Errorf("Origin %q: sync ran", origin)
+		}
+	}
+}
+
+func TestLoopbackGuardRequiresJSONForPost(t *testing.T) {
+	for _, contentType := range []string{"", "text/plain", "application/x-www-form-urlencoded", "multipart/form-data; boundary=x"} {
+		ops := &fakeOps{syncRev: 1}
+		req := localRequest(http.MethodPost, "/api/v1/apps/web/targets/prod/sync", "")
+		req.Header.Set("Content-Type", contentType)
+		rec := httptest.NewRecorder()
+		New(ops, &fakeRecords{}).Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnsupportedMediaType {
+			t.Errorf("Content-Type %q: status = %d, want 415", contentType, rec.Code)
+		}
+		if len(ops.synced) != 0 {
+			t.Errorf("Content-Type %q: sync ran", contentType)
+		}
+	}
+
+	req := localRequest(http.MethodPost, "/api/v1/apps/web/targets/prod/sync", "")
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	rec := httptest.NewRecorder()
+	New(&fakeOps{syncRev: 1}, &fakeRecords{}).Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("application/json with charset: status = %d, want 200", rec.Code)
 	}
 }
 
@@ -178,7 +344,7 @@ func TestRollbackPassesRevision(t *testing.T) {
 }
 
 func TestRollbackRejectsBadBody(t *testing.T) {
-	for _, body := range []string{``, `{`, `{"revision":0}`, `{"revision":-1}`, `{"revision":"2"}`} {
+	for _, body := range []string{``, `{`, `{"revision":0}`, `{"revision":-1}`, `{"revision":"2"}`, `{"revision":1}{"revision":2}`, `{"revision":1} x`} {
 		ops := &fakeOps{}
 		rec := serve(t, New(ops, &fakeRecords{}).Handler(), http.MethodPost, "/api/v1/apps/web/targets/prod/rollback", body)
 		if rec.Code != http.StatusBadRequest {
@@ -190,12 +356,51 @@ func TestRollbackRejectsBadBody(t *testing.T) {
 	}
 }
 
+func TestRollbackAcceptsTrailingWhitespace(t *testing.T) {
+	ops := &fakeOps{syncRev: 3}
+	rec := serve(t, New(ops, &fakeRecords{}).Handler(), http.MethodPost, "/api/v1/apps/web/targets/prod/rollback", "{\"revision\":2}\n\n")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body)
+	}
+}
+
 func TestRollbackMissingRevisionIsNotFound(t *testing.T) {
 	ops := &fakeOps{rollbackErr: fmt.Errorf("rollback: %w", store.ErrNotFound)}
 	rec := serve(t, New(ops, &fakeRecords{}).Handler(), http.MethodPost, "/api/v1/apps/web/targets/prod/rollback", `{"revision":9}`)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestRollbackCorruptRevisionIsUnprocessable(t *testing.T) {
+	ops := &fakeOps{rollbackErr: fmt.Errorf("rollback: %w", reconcile.ErrCorruptRevision)}
+	rec := serve(t, New(ops, &fakeRecords{}).Handler(), http.MethodPost, "/api/v1/apps/web/targets/prod/rollback", `{"revision":1}`)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 (body %s)", rec.Code, rec.Body)
+	}
+	if got := decodeError(t, rec.Body.Bytes()); got.Reason != "corrupt_revision" {
+		t.Fatalf("reason = %q, want corrupt_revision", got.Reason)
+	}
+}
+
+func TestHistoryUnknownTargetIsNotFound(t *testing.T) {
+	records := &fakeRecords{targetErr: store.ErrNotFound}
+	rec := serve(t, New(&fakeOps{}, records).Handler(), http.MethodGet, "/api/v1/apps/web/targets/nope/history", "")
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (body %s)", rec.Code, rec.Body)
+	}
+}
+
+func TestHistoryEmptyKnownTargetIsOK(t *testing.T) {
+	records := &fakeRecords{target: store.Target{Application: "web", Target: "prod"}}
+	rec := serve(t, New(&fakeOps{}, records).Handler(), http.MethodGet, "/api/v1/apps/web/targets/prod/history", "")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body)
 	}
 }
 

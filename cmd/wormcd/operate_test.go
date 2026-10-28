@@ -280,7 +280,9 @@ func assertAPIMatchesCLI(t *testing.T, data, root string, rt *memRuntime) {
 
 	get := func(path string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Host = "127.0.0.1:8080"
+		h.ServeHTTP(rec, req)
 		return rec
 	}
 
