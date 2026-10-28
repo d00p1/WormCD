@@ -209,10 +209,21 @@ func (s *Service) execute(ctx context.Context, r Ref, op operation, src source) 
 	ctx, cancel := context.WithTimeoutCause(ctx, s.syncTimeout, errSyncDeadline)
 	defer cancel()
 
+	// The revision the target keeps is read under the lock, before anything can
+	// fail. A target without a row keeps 0.
+	var last, recorded int64
+	stored, err := s.store.Target(ctx, r.Application, r.Target)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+	case err != nil:
+		return 0, runErr(op, r, err)
+	default:
+		last = stored.LastRevision
+	}
+
 	// A panic in the runtime or in the store must not leave the target
 	// Progressing. It is recorded like any other failure of the run. If the
 	// panic came after the revision was written, the run reports that revision.
-	var last, recorded int64
 	defer func() {
 		if p := recover(); p != nil {
 			if recorded != 0 {
@@ -229,11 +240,9 @@ func (s *Service) execute(ctx context.Context, r Ref, op operation, src source) 
 	if errors.Is(srcErr, ErrUnknownTarget) {
 		return 0, runErr(op, r, srcErr)
 	}
-	target, err := s.store.EnsureTarget(ctx, r.Application, r.Target, cluster)
-	if err != nil {
+	if _, err := s.store.EnsureTarget(ctx, r.Application, r.Target, cluster); err != nil {
 		return 0, runErr(op, r, err)
 	}
-	last = target.LastRevision
 	if err := s.store.SetTargetState(ctx, r.Application, r.Target, store.StatusProgressing, op.message, last); err != nil {
 		return 0, s.fail(ctx, r, op, store.StatusDegraded, stageProgress, last, 0, err)
 	}

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/d00p1/wormcd/internal/desired"
 	"github.com/d00p1/wormcd/internal/runtime"
 	"github.com/d00p1/wormcd/internal/store"
 	_ "modernc.org/sqlite"
@@ -317,6 +318,34 @@ func TestSyncDeadlineExceededDuringApplyDegrades(t *testing.T) {
 	}
 }
 
+func TestSyncUnknownAppWithInvalidNeighbourWritesNothing(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	neighbour := filepath.Join(e.root, "other")
+	if err := os.Mkdir(neighbour, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(neighbour, "wormcd.yaml"), "kind: [\n")
+	ghost := Ref{Application: "ghost", Target: "prod"}
+
+	if _, err := e.svc.Sync(ctx, ghost); !errors.Is(err, ErrUnknownTarget) {
+		t.Fatalf("Sync err = %v, want ErrUnknownTarget", err)
+	}
+	if _, err := e.st.Target(ctx, "ghost", "prod"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("Target err = %v, want ErrNotFound: nothing is recorded", err)
+	}
+	if _, ok := e.svc.locks.slots[ghost]; ok {
+		t.Fatal("a lock slot was created for an undeclared target")
+	}
+	entries, err := os.ReadDir(filepath.Join(e.dir, "locks"))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("lock files = %d, want 0 for an undeclared target", len(entries))
+	}
+}
+
 func TestSyncPanicInRuntimeDegrades(t *testing.T) {
 	ctx := context.Background()
 	e := newEnv(t)
@@ -484,7 +513,7 @@ func TestSyncUnhealthyDegradesWithoutRevision(t *testing.T) {
 func TestSyncInvalidManifestIsBlocked(t *testing.T) {
 	ctx := context.Background()
 	e := newEnv(t)
-	writeFile(t, filepath.Join(e.root, "wormcd.yaml"), "kind: [unterminated\n")
+	writeFile(t, filepath.Join(e.root, "compose.yaml"), "services: [unterminated\n")
 
 	_, err := e.svc.Sync(ctx, prod)
 	if err == nil {
@@ -697,6 +726,28 @@ func TestSyncPanicAfterRevisionReportsRevision(t *testing.T) {
 		t.Fatalf("revisions = %d, want 2", n)
 	}
 	e.assertState(t, "prod", store.StatusDegraded, 2)
+}
+
+func TestPanicBeforeWriteKeepsLastRevision(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	if _, err := e.svc.Sync(ctx, prod); err != nil {
+		t.Fatalf("first Sync: %v", err)
+	}
+
+	op := operation{
+		kind:      kindSync,
+		started:   EventSyncStarted,
+		succeeded: EventSyncSucceeded,
+		failed:    EventSyncFailed,
+		message:   "sync started",
+	}
+	src := func(context.Context) (*desired.Desired, string, error) { panic("injected") }
+	_, err := e.svc.execute(ctx, prod, op, src)
+	if err == nil || !strings.Contains(err.Error(), "panic: injected") {
+		t.Fatalf("execute err = %v, want the panic as an error", err)
+	}
+	e.assertState(t, "prod", store.StatusDegraded, 1)
 }
 
 func TestSyncMissingRootIsNotInvalidManifest(t *testing.T) {
