@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -338,11 +339,15 @@ func TestSyncPanicInRuntimeDegrades(t *testing.T) {
 // passes everything else to the real store.
 type failingStore struct {
 	reconcileStore
-	failStatuses []store.Status
-	failEvents   []EventType
+	failStatuses  []store.Status
+	panicStatuses []store.Status
+	failEvents    []EventType
 }
 
 func (f failingStore) SetTargetState(ctx context.Context, application, target string, status store.Status, message string, lastRevision int64) error {
+	if slices.Contains(f.panicStatuses, status) {
+		panic("injected: set status")
+	}
 	if slices.Contains(f.failStatuses, status) {
 		return errors.New("injected: set status")
 	}
@@ -666,6 +671,107 @@ func TestStatusDoesNotMutate(t *testing.T) {
 		t.Fatalf("events = %d, want %d: Status writes no events", n, eventCount)
 	}
 	e.assertState(t, "prod", store.StatusSynced, 1)
+}
+
+func TestSyncPanicAfterRevisionReportsRevision(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	if _, err := e.svc.Sync(ctx, prod); err != nil {
+		t.Fatalf("first Sync: %v", err)
+	}
+
+	e.setImage(t, imageV2)
+	e.svc.store = failingStore{reconcileStore: e.st, panicStatuses: []store.Status{store.StatusSynced}}
+	number, err := e.svc.Sync(ctx, prod)
+	if err == nil || !strings.Contains(err.Error(), "panic: injected") {
+		t.Fatalf("Sync err = %v, want the panic as an error", err)
+	}
+	if number != 2 {
+		t.Fatalf("returned revision = %d, want 2: the revision was recorded before the panic", number)
+	}
+	var run *RunError
+	if !errors.As(err, &run) || run.Revision != 2 {
+		t.Fatalf("err = %v, want a RunError carrying revision 2", err)
+	}
+	if n := e.revisionCount(t, "prod"); n != 2 {
+		t.Fatalf("revisions = %d, want 2", n)
+	}
+	e.assertState(t, "prod", store.StatusDegraded, 2)
+}
+
+func TestSyncMissingRootIsNotInvalidManifest(t *testing.T) {
+	e := newEnv(t)
+	e.svc.root = filepath.Join(e.dir, "missing")
+
+	_, err := e.svc.Sync(context.Background(), prod)
+	if err == nil || errors.Is(err, ErrInvalidManifest) {
+		t.Fatalf("Sync err = %v, want an error that is not an invalid manifest", err)
+	}
+	var run *RunError
+	if !errors.As(err, &run) || run.Stage != StageRender {
+		t.Fatalf("Sync err = %v, want a RunError at the render stage", err)
+	}
+}
+
+func TestSyncUndeclaredTargetTakesNoLock(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	typo := Ref{Application: "web", Target: "prdo"}
+
+	if _, err := e.svc.Sync(ctx, typo); !errors.Is(err, ErrUnknownTarget) {
+		t.Fatalf("Sync err = %v, want ErrUnknownTarget", err)
+	}
+	if _, ok := e.svc.locks.slots[typo]; ok {
+		t.Fatal("a lock slot was created for an undeclared target")
+	}
+	entries, err := os.ReadDir(filepath.Join(e.dir, "locks"))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("lock files = %d, want 0 for an undeclared target", len(entries))
+	}
+}
+
+func TestStatusErrorsAreRunErrors(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+
+	e.svc.runtimes = func(context.Context, string) (runtime.Runtime, error) {
+		return nil, errors.New("connection refused")
+	}
+	if _, err := e.svc.Status(ctx, prod); !isRunStage(err, stageRuntime) {
+		t.Fatalf("Status err = %v, want a RunError at runtime", err)
+	}
+
+	e.svc.runtimes = func(context.Context, string) (runtime.Runtime, error) {
+		return e.fake, nil
+	}
+	e.fake.inspectErr = errors.New("docker: timeout")
+	if _, err := e.svc.Status(ctx, prod); !isRunStage(err, stageInspect) {
+		t.Fatalf("Status err = %v, want a RunError at inspect", err)
+	}
+}
+
+func isRunStage(err error, stage Stage) bool {
+	var run *RunError
+	return errors.As(err, &run) && run.Stage == stage
+}
+
+func TestRejectsBackslashInName(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	ref := Ref{Application: "web", Target: `prod\x`}
+
+	if _, err := e.svc.Sync(ctx, ref); !errors.Is(err, ErrInvalidRef) {
+		t.Errorf("Sync err = %v, want ErrInvalidRef", err)
+	}
+	if _, err := e.svc.Rollback(ctx, ref, 1); !errors.Is(err, ErrInvalidRef) {
+		t.Errorf("Rollback err = %v, want ErrInvalidRef", err)
+	}
+	if _, err := e.svc.Status(ctx, ref); !errors.Is(err, ErrInvalidRef) {
+		t.Errorf("Status err = %v, want ErrInvalidRef", err)
+	}
 }
 
 type syncResult struct {

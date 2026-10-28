@@ -176,11 +176,11 @@ func (s *Service) Status(ctx context.Context, r Ref) (store.Status, error) {
 	}
 	rt, err := s.runtimes(ctx, cluster)
 	if err != nil {
-		return "", fmt.Errorf("status %s: runtime: %w", r, err)
+		return "", &RunError{Stage: stageRuntime, Err: fmt.Errorf("status %s: runtime: %w", r, err)}
 	}
 	plan, err := observe(ctx, r, state, rt)
 	if err != nil {
-		return "", fmt.Errorf("status %s: inspect: %w", r, err)
+		return "", &RunError{Stage: stageInspect, Err: fmt.Errorf("status %s: inspect: %w", r, err)}
 	}
 	if plan.HasChanges() {
 		return store.StatusOutOfSync, nil
@@ -210,11 +210,15 @@ func (s *Service) execute(ctx context.Context, r Ref, op operation, src source) 
 	defer cancel()
 
 	// A panic in the runtime or in the store must not leave the target
-	// Progressing. It is recorded like any other failure of the run.
-	var last int64
+	// Progressing. It is recorded like any other failure of the run. If the
+	// panic came after the revision was written, the run reports that revision.
+	var last, recorded int64
 	defer func() {
 		if p := recover(); p != nil {
-			number, err = 0, s.fail(ctx, r, op, store.StatusDegraded, stageRun, last, 0, fmt.Errorf("panic: %v", p))
+			if recorded != 0 {
+				last = recorded
+			}
+			number, err = recorded, s.fail(ctx, r, op, store.StatusDegraded, stageRun, last, recorded, fmt.Errorf("panic: %v", p))
 		}
 	}()
 
@@ -244,12 +248,13 @@ func (s *Service) execute(ctx context.Context, r Ref, op operation, src source) 
 	if err != nil {
 		return 0, s.fail(ctx, r, op, store.StatusBlocked, stageRuntime, last, 0, err)
 	}
-	return s.converge(ctx, r, op, state, rt, last)
+	return s.converge(ctx, r, op, state, rt, last, &recorded)
 }
 
 // converge brings the cluster to state, prunes, checks health and records
-// state as the next revision. Each step stops the run at its first error.
-func (s *Service) converge(ctx context.Context, r Ref, op operation, state *desired.Desired, rt runtime.Runtime, last int64) (int64, error) {
+// state as the next revision. Each step stops the run at its first error. Once
+// the revision is written, recorded holds its number.
+func (s *Service) converge(ctx context.Context, r Ref, op operation, state *desired.Desired, rt runtime.Runtime, last int64, recorded *int64) (int64, error) {
 	plan, err := observe(ctx, r, state, rt)
 	if err != nil {
 		return 0, s.fail(ctx, r, op, store.StatusBlocked, stageInspect, last, 0, err)
@@ -282,6 +287,7 @@ func (s *Service) converge(ctx context.Context, r Ref, op operation, state *desi
 	if err != nil {
 		return 0, s.fail(ctx, r, op, store.StatusDegraded, stageRevision, last, 0, err)
 	}
+	*recorded = number
 	if err := s.store.SetTargetState(ctx, r.Application, r.Target, store.StatusSynced, "", number); err != nil {
 		// The revision is recorded and stays. The status says so, because it
 		// could not be updated to Synced.
