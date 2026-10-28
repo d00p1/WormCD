@@ -129,6 +129,10 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleTarget(w http.ResponseWriter, r *http.Request) {
 	ref := refOf(r)
+	if err := reconcile.ValidateRef(ref); err != nil {
+		writeError(w, err)
+		return
+	}
 	t, err := s.records.Target(r.Context(), ref.Application, ref.Target)
 	if err != nil {
 		writeError(w, err)
@@ -139,6 +143,10 @@ func (s *Server) handleTarget(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	ref := refOf(r)
+	if err := reconcile.ValidateRef(ref); err != nil {
+		writeError(w, err)
+		return
+	}
 	t, err := s.records.Target(r.Context(), ref.Application, ref.Target)
 	if err != nil {
 		writeError(w, err)
@@ -161,6 +169,7 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A run must finish even if the client goes away, or it would stop halfway through an apply.
+	// Waiting for another run on the same target has no deadline: a known limitation of M1.
 	number, err := s.ops.Sync(context.WithoutCancel(r.Context()), ref)
 	if err != nil {
 		writeError(w, err)
@@ -195,6 +204,10 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	ref := refOf(r)
+	if err := reconcile.ValidateRef(ref); err != nil {
+		writeError(w, err)
+		return
+	}
 	revs, err := s.records.Revisions(r.Context(), ref.Application, ref.Target)
 	if err != nil {
 		writeError(w, err)

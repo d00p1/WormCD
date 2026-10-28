@@ -72,9 +72,14 @@ type fakeRecords struct {
 	revsErr   error
 }
 
+// Target returns the stored target only for its own name, and ErrNotFound for
+// any other, as the store does.
 func (f *fakeRecords) Target(_ context.Context, app, target string) (store.Target, error) {
 	if f.targetErr != nil {
 		return store.Target{}, f.targetErr
+	}
+	if f.target.Application != app || f.target.Target != target {
+		return store.Target{}, store.ErrNotFound
 	}
 	return f.target, nil
 }
@@ -270,6 +275,9 @@ func TestInvalidRefIsBadRequest(t *testing.T) {
 		{http.MethodPost, "/api/v1/apps/web/targets/pr%5Cod/sync", ""},
 		{http.MethodPost, "/api/v1/apps/we%5Cb/targets/prod/rollback", `{"revision":1}`},
 		{http.MethodGet, "/api/v1/apps/web/targets/pr%5Cod/status", ""},
+		{http.MethodGet, "/api/v1/apps/web/targets/pr%5Cod", ""},
+		{http.MethodGet, "/api/v1/apps/we%5Cb/targets/prod", ""},
+		{http.MethodGet, "/api/v1/apps/web/targets/pr%5Cod/history", ""},
 	} {
 		rec := serve(t, h, tc.method, tc.path, tc.body)
 		if rec.Code != http.StatusBadRequest {
