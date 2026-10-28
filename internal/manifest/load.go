@@ -54,7 +54,7 @@ func LoadWithCluster(ctx context.Context, opts Options) (*desired.Desired, strin
 		return nil, "", err
 	}
 	if err := app.validate(); err != nil {
-		return nil, "", fmt.Errorf("%s: %w", abs, err)
+		return nil, "", fmt.Errorf("%s: %w: %w", abs, ErrInvalidManifest, err)
 	}
 
 	selected, err := app.selectTarget(target)
@@ -93,22 +93,41 @@ func LoadWithCluster(ctx context.Context, opts Options) (*desired.Desired, strin
 		cli.WithDotEnv,
 	)
 	if err != nil {
-		return nil, "", fmt.Errorf("%s: %w", abs, err)
+		return nil, "", fmt.Errorf("%s: %w: %w", abs, ErrInvalidManifest, err)
 	}
 
 	project, err := projectOptions.LoadProject(ctx)
 	if err != nil {
-		return nil, "", fmt.Errorf("%s: %w", abs, err)
+		if ctx.Err() != nil {
+			return nil, "", fmt.Errorf("%s: %w", abs, err)
+		}
+		return nil, "", fmt.Errorf("%s: %w: %w", abs, ErrInvalidManifest, err)
 	}
 
 	state, err := normalize(project, app.Metadata.Name, selected, namespace, baseDir)
 	if err != nil {
 		if len(project.ComposeFiles) > 0 {
-			return nil, "", fmt.Errorf("%s: %w", strings.Join(project.ComposeFiles, ", "), err)
+			return nil, "", fmt.Errorf("%s: %w: %w", strings.Join(project.ComposeFiles, ", "), ErrInvalidManifest, err)
 		}
-		return nil, "", err
+		return nil, "", fmt.Errorf("%w: %w", ErrInvalidManifest, err)
 	}
 	return state, selected.Cluster, nil
+}
+
+// Declares reports whether the manifests under opts.Root declare the application
+// and target that opts.App names. It reads the manifests and does not render the
+// Compose files. An undeclared name wraps ErrNotDeclared.
+func Declares(opts Options) error {
+	file, target, err := resolveOptions(opts)
+	if err != nil {
+		return err
+	}
+	app, err := loadApplication(file)
+	if err != nil {
+		return err
+	}
+	_, err = app.selectTarget(target)
+	return err
 }
 
 func resolveOptions(opts Options) (file, target string, err error) {
@@ -138,6 +157,12 @@ func resolveOptions(opts Options) (file, target string, err error) {
 		return "", "", fmt.Errorf("either file or app is required")
 	}
 }
+
+// ErrInvalidManifest is the cause of an error in the manifests themselves: they
+// do not parse, do not validate, reference a path outside the application, or
+// do not render. Errors of reading the checkout, such as a missing root, do not
+// wrap it.
+var ErrInvalidManifest = errors.New("invalid manifest")
 
 // ErrNotDeclared is returned when the application or the target is not in the
 // manifests under the root. The manifests are the source of truth, so an
@@ -176,13 +201,13 @@ func findApplication(root, name string) (string, error) {
 	switch len(found) {
 	case 0:
 		if len(invalid) > 0 {
-			return "", fmt.Errorf("application %q not found under %s (invalid manifests: %s)", name, root, strings.Join(invalid, "; "))
+			return "", fmt.Errorf("%w: application %q not found under %s (invalid manifests: %s)", ErrInvalidManifest, name, root, strings.Join(invalid, "; "))
 		}
 		return "", fmt.Errorf("%w: application %q not found under %s", ErrNotDeclared, name, root)
 	case 1:
 		return found[0], nil
 	default:
-		return "", fmt.Errorf("application %q is ambiguous: %s", name, strings.Join(found, ", "))
+		return "", fmt.Errorf("%w: application %q is ambiguous: %s", ErrInvalidManifest, name, strings.Join(found, ", "))
 	}
 }
 
@@ -193,14 +218,14 @@ func rejectOverrideTags(path string) error {
 	}
 	var document yaml.Node
 	if err := yaml.Unmarshal(data, &document); err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return fmt.Errorf("%s: %w: %w", path, ErrInvalidManifest, err)
 	}
 	return walkTags(&document, path)
 }
 
 func walkTags(node *yaml.Node, path string) error {
 	if node.Tag == "!reset" || node.Tag == "!override" {
-		return fmt.Errorf("%s:%d:%d: %s tags are not supported; use merge-only overlays", path, node.Line, node.Column, node.Tag)
+		return fmt.Errorf("%w: %s:%d:%d: %s tags are not supported; use merge-only overlays", ErrInvalidManifest, path, node.Line, node.Column, node.Tag)
 	}
 	for _, child := range node.Content {
 		if err := walkTags(child, path); err != nil {
@@ -212,7 +237,7 @@ func walkTags(node *yaml.Node, path string) error {
 
 func resolveLocal(baseDir, path string) (string, error) {
 	if !filepath.IsLocal(path) {
-		return "", fmt.Errorf("%q must be a relative path inside the application directory", path)
+		return "", fmt.Errorf("%w: %q must be a relative path inside the application directory", ErrInvalidManifest, path)
 	}
 	return filepath.Join(baseDir, path), nil
 }

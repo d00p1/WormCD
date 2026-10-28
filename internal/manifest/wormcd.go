@@ -67,15 +67,15 @@ func loadApplication(path string) (*Application, error) {
 
 	var app Application
 	if err := dec.Decode(&app); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, fmt.Errorf("%s: %w: %w", path, ErrInvalidManifest, err)
 	}
 
 	var extra any
 	if err := dec.Decode(&extra); err != io.EOF {
 		if err == nil {
-			return nil, fmt.Errorf("%s: multiple YAML documents are not supported", path)
+			return nil, fmt.Errorf("%s: %w: multiple YAML documents are not supported", path, ErrInvalidManifest)
 		}
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, fmt.Errorf("%s: %w: %w", path, ErrInvalidManifest, err)
 	}
 	return &app, nil
 }
@@ -132,7 +132,7 @@ func (a *Application) selectTarget(name string) (Target, error) {
 	if len(a.Spec.Targets) == 1 {
 		return a.Spec.Targets[0], nil
 	}
-	return Target{}, fmt.Errorf("target is required (available: %s)", a.targetNames())
+	return Target{}, fmt.Errorf("%w: target is required (available: %s)", ErrInvalidManifest, a.targetNames())
 }
 
 func (a *Application) targetNames() string {

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"os"
 	"path/filepath"
@@ -365,6 +366,28 @@ func TestLoadByAppNotFound(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid manifests") {
 		t.Fatalf("error = %v, want the invalid manifest to be reported", err)
+	}
+}
+
+func TestLoadErrorsWrapInvalidManifest(t *testing.T) {
+	ctx := context.Background()
+	if _, err := Load(ctx, Options{App: "broken/prod", Root: filepath.Join("testdata")}); !errors.Is(err, ErrInvalidManifest) {
+		t.Errorf("broken manifest: err = %v, want ErrInvalidManifest", err)
+	}
+	path := writeApp(t, "kind: Application\n", nil)
+	if _, err := Load(ctx, Options{File: path}); !errors.Is(err, ErrInvalidManifest) {
+		t.Errorf("wrong apiVersion: err = %v, want ErrInvalidManifest", err)
+	}
+	if _, err := Load(ctx, Options{App: "missing/prod", Root: t.TempDir()}); !errors.Is(err, ErrNotDeclared) || errors.Is(err, ErrInvalidManifest) {
+		t.Errorf("undeclared application: err = %v, want ErrNotDeclared only", err)
+	}
+}
+
+func TestLoadReadErrorIsNotInvalidManifest(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	_, err := Load(context.Background(), Options{App: "web/prod", Root: missing})
+	if err == nil || errors.Is(err, ErrInvalidManifest) || errors.Is(err, ErrNotDeclared) {
+		t.Fatalf("err = %v, want a read error that is neither invalid nor undeclared", err)
 	}
 }
 
