@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -56,13 +57,14 @@ type SyncPolicy struct {
 }
 
 func loadApplication(path string) (*Application, error) {
-	f, err := os.Open(path)
+	// The file is read before it is parsed, so a read error is not mistaken for
+	// a parse error.
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close() //nolint:errcheck // read-only file
 
-	dec := yaml.NewDecoder(f)
+	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 
 	var app Application

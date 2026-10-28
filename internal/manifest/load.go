@@ -187,6 +187,9 @@ func findApplication(root, name string) (string, error) {
 		}
 		app, err := loadApplication(path)
 		if err != nil {
+			if !errors.Is(err, ErrInvalidManifest) {
+				return err
+			}
 			invalid = append(invalid, err.Error())
 			return nil
 		}
@@ -200,8 +203,10 @@ func findApplication(root, name string) (string, error) {
 	}
 	switch len(found) {
 	case 0:
+		// An invalid manifest may be the one that declares the application, so the
+		// name cannot be ruled out. It still stays unknown: nothing is recorded for it.
 		if len(invalid) > 0 {
-			return "", fmt.Errorf("%w: application %q not found under %s (invalid manifests: %s)", ErrInvalidManifest, name, root, strings.Join(invalid, "; "))
+			return "", fmt.Errorf("%w: %w: application %q not found under %s (invalid manifests: %s)", ErrNotDeclared, ErrInvalidManifest, name, root, strings.Join(invalid, "; "))
 		}
 		return "", fmt.Errorf("%w: application %q not found under %s", ErrNotDeclared, name, root)
 	case 1:

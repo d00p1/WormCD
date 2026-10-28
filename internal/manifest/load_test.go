@@ -391,6 +391,32 @@ func TestLoadReadErrorIsNotInvalidManifest(t *testing.T) {
 	}
 }
 
+func TestUndeclaredAppWithInvalidNeighbourIsNotDeclared(t *testing.T) {
+	root := filepath.Dir(writeApp(t, "kind: [\n", nil))
+	_, err := Load(context.Background(), Options{App: "ghost/prod", Root: root})
+	if !errors.Is(err, ErrNotDeclared) || !errors.Is(err, ErrInvalidManifest) {
+		t.Fatalf("err = %v, want ErrNotDeclared and ErrInvalidManifest", err)
+	}
+	if err := Declares(Options{App: "ghost/prod", Root: root}); !errors.Is(err, ErrNotDeclared) {
+		t.Fatalf("Declares err = %v, want ErrNotDeclared", err)
+	}
+}
+
+func TestUnreadableNeighbourIsNotInvalidManifest(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "broken")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "missing.yaml"), filepath.Join(dir, "wormcd.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(context.Background(), Options{App: "web/prod", Root: root})
+	if err == nil || errors.Is(err, ErrInvalidManifest) || errors.Is(err, ErrNotDeclared) {
+		t.Fatalf("err = %v, want a read error that is neither invalid nor undeclared", err)
+	}
+}
+
 func TestLoadBaseOnly(t *testing.T) {
 	path := writeApp(t, "", map[string]string{
 		"compose.yaml": `services:
