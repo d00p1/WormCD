@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/d00p1/wormcd/internal/runtime"
 )
@@ -51,9 +52,31 @@ func TestSyncWaitsForOtherProcessLock(t *testing.T) {
 	if max := e.fake.maxInFlight["prod"]; max != 1 {
 		t.Fatalf("max concurrent syncs of prod = %d, want 1", max)
 	}
-	if _, err := os.Stat(filepath.Join(e.dir, "locks", "web-prod.lock")); err != nil {
+	if _, err := os.Stat(filepath.Join(e.dir, "locks", lockFileName(prod))); err != nil {
 		t.Fatalf("lock file: %v", err)
 	}
+}
+
+func TestLockFilesDoNotCollide(t *testing.T) {
+	a := Ref{Application: "a-b", Target: "c"}
+	b := Ref{Application: "a", Target: "b-c"}
+	if lockFileName(a) == lockFileName(b) {
+		t.Fatalf("lock file of %s and %s is the same: %s", a, b, lockFileName(a))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	files := &fileLocks{dir: t.TempDir(), onWait: func() { t.Errorf("a lock of another target was waited for") }}
+	unlockA, err := files.acquire(ctx, a)
+	if err != nil {
+		t.Fatalf("acquire %s: %v", a, err)
+	}
+	defer unlockA()
+	unlockB, err := files.acquire(ctx, b)
+	if err != nil {
+		t.Fatalf("acquire %s while %s is held: %v", b, a, err)
+	}
+	unlockB()
 }
 
 func TestSyncCanceledWhileWaitingForOtherProcessLock(t *testing.T) {
