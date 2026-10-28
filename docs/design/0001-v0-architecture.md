@@ -265,6 +265,7 @@ Control plane (ADR-0006) запускается сервисом с одной �
 GET    /api/v1/apps
 GET    /api/v1/apps/{app}
 GET    /api/v1/apps/{app}/targets/{target}
+GET    /api/v1/apps/{app}/targets/{target}/status   # M1: stored target + live drift check
 POST   /api/v1/apps/{app}/targets/{target}/sync
 POST   /api/v1/apps/{app}/targets/{target}/rollback
 GET    /api/v1/apps/{app}/targets/{target}/history

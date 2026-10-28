@@ -52,7 +52,7 @@ mise run fix              # apply safe autofixes, then review the diff
 ```sh
 make build
 ./bin/wormcd version
-./bin/wormcd server --listen :8080   # GET /healthz
+./bin/wormcd server --data wormcd.db --root /path/to/deploy-repo   # 127.0.0.1:8080
 ```
 
 Render an application from a deploy repository (read-only, no cluster needed):
@@ -72,6 +72,19 @@ Plan a target against a Swarm cluster (read-only):
 `diff` is read-only and, until the cluster registry arrives in M2, connects to
 the local Docker socket (`unix:///var/run/docker.sock`). Exit codes: `0` — no
 differences, `2` — the plan has changes, `1` — error.
+
+Apply and inspect history (needs a SQLite database with `--data`):
+
+```sh
+./bin/wormcd sync web/staging --root /path/to/deploy-repo --data wormcd.db
+./bin/wormcd status web/staging --root /path/to/deploy-repo --data wormcd.db
+./bin/wormcd history web/staging --data wormcd.db
+./bin/wormcd rollback web/staging --revision 3 --root /path/to/deploy-repo --data wormcd.db
+```
+
+`sync` applies the plan at once; use `diff` to preview it. The same operations
+are served by `wormcd server` under `/api/v1/apps/{app}/targets/{target}`. The
+API listens on loopback only in M1 and has no authentication yet.
 
 Unit tests are hermetic. Docker integration tests are opt-in:
 
