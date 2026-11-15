@@ -583,11 +583,19 @@ func (n *normalizer) serviceConfigs(key string, refs []types.ServiceConfigObjCon
 		if ref.Mode != nil {
 			mode = uint32(*ref.Mode)
 		}
+		uid := ref.UID
+		if uid == "" {
+			uid = "0"
+		}
+		gid := ref.GID
+		if gid == "" {
+			gid = "0"
+		}
 		out = append(out, desired.ConfigRef{
 			Source: name,
 			Target: target,
-			UID:    ref.UID,
-			GID:    ref.GID,
+			UID:    uid,
+			GID:    gid,
 			Mode:   mode,
 		})
 	}
@@ -609,11 +617,19 @@ func (n *normalizer) serviceSecrets(key string, refs []types.ServiceSecretConfig
 		if ref.Mode != nil {
 			mode = uint32(*ref.Mode)
 		}
+		uid := ref.UID
+		if uid == "" {
+			uid = "0"
+		}
+		gid := ref.GID
+		if gid == "" {
+			gid = "0"
+		}
 		out = append(out, desired.SecretRef{
 			Source: name,
 			Target: target,
-			UID:    ref.UID,
-			GID:    ref.GID,
+			UID:    uid,
+			GID:    gid,
 			Mode:   mode,
 		})
 	}

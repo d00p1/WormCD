@@ -43,12 +43,38 @@ external secret name.
 - **Swarm deploy fields.** Healthcheck, resources, restart policy, update
   config and placement constraints all map onto the normalized model.
 
-## Trying a diff
+## Run it against a local Swarm
 
-M0 cannot deploy yet (`apply` is M1), and `wormcd diff` only sees objects
-labelled `com.wormcd.application` / `com.wormcd.target`. To exercise the plan
-against a real cluster, use the labelled stand in
-[`cmd/wormcd/testdata/stand/`](../../cmd/wormcd/testdata/stand/README.md)
-or create the objects manually with those labels. `docker stack deploy` alone
-is not enough: it neither names objects with the `<app>_<target>_` prefix nor
-attaches the WormCD labels.
+M1 can apply this repo. From the WormCD repository root, with a Swarm
+manager available:
+
+```sh
+make build
+docker swarm init   # once, if the node is not a manager yet
+
+# v0 supports external Docker secrets only: create them before syncing.
+printf 'demo-tls-key' | docker secret create prod_tls_key -
+printf 'demo-tls-key' | docker secret create staging_tls_key -   # for web/staging
+
+./bin/wormcd diff --app web/prod --root examples/deploy-repo   # preview, exit 2 on drift
+./bin/wormcd sync web/prod --root examples/deploy-repo --data /tmp/wormcd.db
+./bin/wormcd status web/prod --root examples/deploy-repo --data /tmp/wormcd.db
+./bin/wormcd history web/prod --data /tmp/wormcd.db
+```
+
+Two things can stop a `sync` on a toy single-node Swarm:
+
+- **Placement.** The base compose demonstrates placement constraints
+  (`node.role == worker`), so the service schedules only when a worker node
+  joins. On a manager-only node, copy this directory to a scratch path,
+  remove that constraint, and point `--root` at the copy.
+- **Image.** `ghcr.io/d00p1/wormcd-demo` is a private image (prod pins a
+  digest, staging a tag). When the daemon cannot pull it, the service never
+  converges and `sync` waits until its run deadline (30 minutes by default),
+  so cancel it early and check
+  `docker service ps wormcd_web_prod_web --no-trunc` for the task's error
+  (for example `No such image`).
+
+The read-only variant of this stand (hand-labelled objects, `replicas: 0`, no
+image pull) lives in
+[`cmd/wormcd/testdata/stand/`](../../cmd/wormcd/testdata/stand/README.md).

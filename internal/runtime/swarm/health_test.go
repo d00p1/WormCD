@@ -206,8 +206,8 @@ func TestIsCurrentComparesSpecAndCreation(t *testing.T) {
 
 	older := task
 	older.CreatedAt = service.UpdatedAt.Add(-time.Second)
-	if isCurrent(older, service) {
-		t.Fatal("a task created before the last update is current")
+	if !isCurrent(older, service) {
+		t.Fatal("a task of the service's spec stays current when the daemon refreshes the service status")
 	}
 
 	other := task
