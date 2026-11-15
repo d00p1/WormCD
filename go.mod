@@ -1,6 +1,6 @@
 module github.com/d00p1/wormcd
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/compose-spec/compose-go/v2 v2.16.2
