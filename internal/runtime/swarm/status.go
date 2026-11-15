@@ -3,8 +3,9 @@ package swarm
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"fmt"
-	"reflect"
+	"time"
 
 	"github.com/d00p1/wormcd/internal/desired"
 	"github.com/moby/moby/api/types/swarm"
@@ -31,15 +32,78 @@ type serviceStatus struct {
 }
 
 // isCurrent reports whether a task was made from the revision the service runs
-// now. Docker has no revision number on tasks, so the task spec is compared with
-// the service's task template, as swarmkit's IsTaskDirty does, and the task must
-// not be older than the last update.
+// now. Docker has no revision number on tasks, so the task spec is compared
+// with the service's task template, as swarmkit's IsTaskDirty does.
 //
-// This assumes the daemon stores the template as it was sent. If it normalized
-// the spec, no task would match and Apply would never converge; the integration
-// tests in #22 check that.
+// The daemon does not store the template as it was sent: it drops fields equal
+// to defaults from the stored task spec (Runtime "container", a 10s stop grace
+// period, an empty DNSConfig, an empty Placement, the default restart policy)
+// and adds some to both specs (Init, Isolation, the resolved image digest).
+// Both specs are therefore canonicalized before the comparison; the
+// integration tests in #22 cover a real daemon's normalization.
+//
+// A task's creation time is not compared with the service's update time: the
+// daemon bumps the service version and UpdatedAt when it refreshes the
+// service's runtime status, so a current task can look older than the last
+// update. What the task runs is its spec.
 func isCurrent(task swarm.Task, service swarm.Service) bool {
-	return reflect.DeepEqual(task.Spec, service.Spec.TaskTemplate) && !task.CreatedAt.Before(service.UpdatedAt)
+	return canonicalSpec(task.Spec) == canonicalSpec(service.Spec.TaskTemplate)
+}
+
+// Defaults the daemon drops from the task spec it stores. They match the
+// daemon's own defaults, so removing them from both specs loses nothing.
+const (
+	defaultStopGraceNanos = int64(10 * time.Second)
+	defaultRestartDelay   = int64(5 * time.Second)
+)
+
+// canonicalSpec is the JSON encoding of spec with daemon-defaulted fields
+// removed, so a stored task spec and the service's task template compare
+// equal when they describe the same task.
+func canonicalSpec(spec swarm.TaskSpec) string {
+	data, err := json.Marshal(spec)
+	if err != nil {
+		return fmt.Sprintf("%#v", spec)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		return string(data)
+	}
+	if m["Runtime"] == "container" {
+		delete(m, "Runtime")
+	}
+	if c, ok := m["ContainerSpec"].(map[string]any); ok {
+		if c["StopGracePeriod"] == float64(defaultStopGraceNanos) {
+			delete(c, "StopGracePeriod")
+		}
+		if dns, ok := c["DNSConfig"].(map[string]any); ok && len(dns) == 0 {
+			delete(c, "DNSConfig")
+		}
+	}
+	if p, ok := m["Placement"].(map[string]any); ok && len(p) == 0 {
+		delete(m, "Placement")
+	}
+	if rp, ok := m["RestartPolicy"].(map[string]any); ok && isDefaultRestartPolicy(rp) {
+		delete(m, "RestartPolicy")
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		return string(data)
+	}
+	return string(out)
+}
+
+// isDefaultRestartPolicy reports whether rp encodes the daemon's default
+// restart policy (condition any, delay 5s, no attempt or window limit). The
+// omitted zero fields are not in the map.
+func isDefaultRestartPolicy(rp map[string]any) bool {
+	if rp["Condition"] != "any" {
+		return false
+	}
+	if len(rp) == 1 {
+		return true
+	}
+	return len(rp) == 2 && rp["Delay"] == float64(defaultRestartDelay)
 }
 
 // pending says why the service has not converged on a version newer than

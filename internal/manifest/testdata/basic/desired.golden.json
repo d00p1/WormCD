@@ -48,6 +48,8 @@
         {
           "source": "wormcd_web_prod_nginx_56fccc8af6a7",
           "target": "/etc/nginx/nginx.conf",
+          "uid": "0",
+          "gid": "0",
           "mode": 292
         }
       ],
@@ -55,6 +57,8 @@
         {
           "source": "prod_tls_key",
           "target": "/run/secrets/tls.key",
+          "uid": "0",
+          "gid": "0",
           "mode": 292
         }
       ],
