@@ -13,6 +13,12 @@ Never disable a lint rule or add a suppression to get a change through. An
 exception must name one path and one rule, carry a reason and a review date,
 and needs a human decision.
 
+## Worktrees
+
+A session rooted in a worktree works only within that checkout: branch
+switches, pulls and rebases run there. The main checkout's working tree and
+current branch are left untouched — it is the user's, not the session's.
+
 ## Agent skills
 
 ### Issue tracker

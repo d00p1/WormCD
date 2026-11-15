@@ -16,26 +16,28 @@ image digest back to the deploy repository.
 ## Status
 
 Early development. Compose/overlay rendering (`wormcd render`), read-only
-Swarm inspection and read-only planning (`wormcd diff`) are implemented;
-reconciliation (apply) is next.
+planning (`wormcd diff`) and Swarm reconciliation (`wormcd sync`, plus
+`status`, `history` and `rollback`) are implemented; fetching Git sources and
+multi-cluster targets are next (M2).
 
 | Capability | Status |
 |---|---|
 | Write `wormcd.yaml` + Compose + overlay, render `Desired` | `wormcd render` |
 | Inspect a Swarm cluster read-only | `Runtime.Inspect` (internal) |
 | Plan `Desired` vs `Observed` (`Create`/`Update`/`Delete`/`Noop`) | `wormcd diff`, exit `2` on drift |
-| Apply, prune, self-heal | not yet (M1) |
+| Apply, prune, self-heal | `wormcd sync` |
+| Rollback to a stored revision | `wormcd rollback` |
 | Fetch Git sources, multi-cluster targets | not yet (M2) |
-| Webhooks, `syncPolicy`, rollback | not yet (M3) |
+| Webhooks, `syncPolicy` | not yet (M3) |
 | Registry polling for new image versions | not planned: CI builds the image and commits the digest to the deploy repository |
 
 ![WormCD M0: manifests from Git, state from Swarm, read-only plan](docs/assets/wormcd-m0-readonly-diff.svg)
 
-To try it now, write the manifests in a local checkout, create the labelled
-objects described in [cmd/wormcd/testdata/stand/README.md](cmd/wormcd/testdata/stand/README.md),
-and run `wormcd diff`. A complete, renderable deploy repo lives in
-[examples/deploy-repo](examples/deploy-repo/). WormCD does not deploy yet — use
-`docker stack deploy` for the workload.
+To try it now, run `wormcd diff` and `wormcd sync` against a local Swarm with
+the deploy repo in [examples/deploy-repo](examples/deploy-repo/) — its README
+has the full run recipe (Swarm init, external secret, placement constraint).
+For a read-only plan against hand-labelled objects, see
+[cmd/wormcd/testdata/stand/README.md](cmd/wormcd/testdata/stand/README.md).
 
 ## Development
 
